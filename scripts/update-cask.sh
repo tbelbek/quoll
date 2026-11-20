@@ -14,7 +14,7 @@ cask "quoll" do
   desc "Instant filename search with a global hotkey"
   homepage "https://github.com/tbelbek/quoll"
 
-  depends_on macos: ">= :ventura"
+  depends_on macos: :ventura
 
   app "Quoll.app"
   binary "#{appdir}/Quoll.app/Contents/MacOS/quoll-cli", target: "quoll"

@@ -32,6 +32,7 @@ gap.
 **Homebrew.**
 
 ```bash
+brew trust tbelbek/quoll                  # newer Homebrew asks before using a third-party tap
 brew install --cask tbelbek/quoll/quoll   # app in /Applications, `quoll` CLI on PATH
 ```
 
