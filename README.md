@@ -1,183 +1,224 @@
 # Quoll
 
-Fast, local file search for macOS. Quoll keeps a warm catalog of your disks and
-answers filename queries in milliseconds, with a menu-bar app, a CLI and a
-small local service that other tools can query.
+**Instant filename search for macOS, in the spirit of Everything.** Press a
+hotkey, type, and every file and folder in your home folder is there in a few
+milliseconds — including the dot-folders Spotlight never indexes.
 
-Measured on a MacBook Air, whole home folder (2.3M entries): full scan 11.7 s,
-170 MB snapshot on disk, start-up 3.4 ms, service footprint ~4 MB idle and up to
-~17 MB while searching, substring queries < 6 ms. Dot-folders are indexed
-(Spotlight skips them). Details: [docs/DECISIONS.md](docs/DECISIONS.md).
+| Whole home folder, MacBook Air | |
+| --- | --- |
+| Entries | 2.3 million |
+| Full scan | 11.7 s (once; afterwards updates are incremental) |
+| Start-up | 3.4 ms (memory-mapped index) |
+| Memory while idle / searching | ~4 MB / up to ~17 MB |
+| Typical query | 2–10 ms |
+| Index on disk | 170 MB |
 
-macOS has Spotlight, but it is optimized for content and metadata search and
-does not behave like a filename index you can query instantly, filter with a
-boolean expression, or script over a stable local protocol. Quoll fills that
-gap.
+Spotlight is built for content and metadata, skips every path under a
+dot-folder (`.config`, `.git`, `.raw`, …) and cannot be queried like an index.
+Quoll keeps its own filename index, updates it from FSEvents, and answers from a
+menu-bar app, a command-line tool, a local socket and an optional HTTP endpoint.
+Everything stays on your Mac.
 
 ## Features
 
-- Memory-mapped catalog with incremental FSEvents updates, including changes
-  made while Quoll was not running.
-- Default excludes (`.git`, `node_modules`, `.Trash`, `.cache`,
-  `~/Library/Caches`, `~/Library/CloudStorage`); includes override them.
-- Boolean queries, quoted phrases, wildcards, regex and property filters.
-- Sort by name, path, size, timestamps, extension or depth.
-- CLI (`quoll`), menu-bar app and JSON/CSV/TSV export.
-- Local control socket with a line-oriented JSON protocol.
-- Optional HTTP endpoint with Basic authentication.
-- Per-user data, no network access required.
+**Search**
+- Search as you type over the whole index; matches shown in bold.
+- Words, phrases, `|` (or), `!` (not), wildcards (`*.pdf`), regular expressions.
+- Filters for extension (`ending:jpg;png;heic`), kind, size, modified/created
+  dates (`changed:2025` is the whole year), folder (`under:`, `parent:`), path,
+  depth, empty files, case and whole words.
+- Case- and accent-insensitive by default, Turkish `ı/İ` included (`irmak`
+  finds `ırmak`).
+- Scopes: `scope:user` (your own files) built in, your own in Settings.
+
+**Window**
+- One global hotkey shows and hides it from anywhere; Esc hides.
+- Columns: Name, Folder, Size, Modified, Opened, plus Created and Kind (header
+  right-click). Sort by any of Name, Size, Modified, Created, Opened.
+- Folders show their total size, computed from the index.
+- Type filters (All, Folders, Documents, Pictures, Audio, Video, Archives, Code,
+  My Files) and your scopes, ⌘1–⌘9.
+- Recent and saved searches in the magnifier menu.
+- Quick Look, Open With, Reveal in Finder, Open in Terminal, Rename, Move to
+  Trash, copy paths or names, drag files out.
+- "Opened" counts what you opened from Quoll; sort by it for most-used first.
+- Index statistics: largest folders, file types by size.
+- Movable, resizable, full screen; follows light and dark mode.
+
+**Index**
+- Incremental: live FSEvents updates (~1 s), and changes made while Quoll was
+  not running are replayed at start (10k offline changes in ~1.5 s).
+- Sensible default excludes (`.git`, `node_modules`, `.Trash`, `.cache`,
+  `~/Library/Caches`, `~/Library/CloudStorage`); includes override any exclude;
+  exclude a folder straight from a result. Rule changes apply without a rescan
+  where possible.
+- External drives (optional): a separate index per drive while it is connected,
+  never blocking an eject, caught up on reattach.
+- Full scans run in a short-lived helper process, so the app's memory stays small.
+- Never downloads iCloud or File Provider content while scanning.
+
+**Integrations**
+- `quoll` CLI with `--paths` / `--json` output for scripts.
+- Finder › Services › *Search in Quoll* (search inside a folder).
+- `quoll://search?q=…` URLs and `quoll show "query"`.
+- Local Unix socket with a line-oriented JSON protocol; optional HTTP endpoint.
+- Open at login.
 
 ## Install
 
-**Homebrew.**
+**Homebrew**
 
 ```bash
 brew trust tbelbek/quoll                  # newer Homebrew asks before using a third-party tap
-brew install --cask tbelbek/quoll/quoll   # app in /Applications, `quoll` CLI on PATH
+brew install --cask tbelbek/quoll/quoll   # Quoll.app in /Applications, `quoll` on PATH
 ```
 
-**Download.** Grab `Quoll-<version>-macos-universal.zip` from
-[Releases](https://github.com/tbelbek/quoll/releases), unzip, move `Quoll.app` to
-`/Applications`. Unless the release notes say it is notarized, macOS quarantines
-apps from the internet; clear that once:
+**Download** `Quoll-<version>-macos-universal.zip` from
+[Releases](https://github.com/tbelbek/quoll/releases) (Apple silicon and Intel),
+unzip and move `Quoll.app` to `/Applications`. Releases are not notarized yet;
+clear the quarantine flag once:
 
 ```bash
 xattr -dr com.apple.quarantine /Applications/Quoll.app
 ```
 
-**First launch.**
+**First launch**
 
-1. Open Quoll; a magnifier icon appears in the menu bar (on a notched MacBook it
-   may hide behind the notch when the bar is full).
+1. Open Quoll. It lives in the menu bar (no Dock icon). On a notched MacBook with
+   a crowded menu bar the icon can sit behind the notch; ⌘-drag it elsewhere, or
+   use the hotkey / `quoll show`.
 2. Grant **Full Disk Access** (System Settings › Privacy & Security › Full Disk
-   Access › add Quoll), otherwise macOS asks folder by folder and the first scan
+   Access › add Quoll). Without it macOS asks folder by folder and the first scan
    waits for each answer.
-3. Press the hotkey: **Hyper+S** (⌃⌥⇧⌘S) by default. With a tool that maps Caps Lock to ⌃⌥⌘ (a "super key", e.g. Vorssaint) use `super+s`. Change it in Settings (⌘,) or `quoll settings --hotkey super+s`,
-   e.g. `control+option+space` or `cmd+shift+f`.
+3. Press the hotkey — **Hyper+S** (⌃⌥⇧⌘S) by default. If Caps Lock is mapped to
+   ⌃⌥⌘ (a "super key"), use `super+s`. Change it in Settings (⌘,) with the
+   recorder, or `quoll settings --hotkey super+s`.
+4. Optional: Settings › *Open Quoll at login*, *Index external drives*.
 
-**Window.** Type to search; matches are shown in bold. ↑/↓ select, Enter opens,
-⌘Enter reveals in Finder, ⌘Y Quick Look, ⌘C copies paths, ⌘⌥C names, Esc hides,
-⌃⌘F full screen. Click a column header to sort; right-click the header to show
-Created or Kind. The menu next to the field filters by type (All, Folders,
-Documents, Pictures, Audio, Video, Archives, Code; ⌘1–⌘8). The magnifier menu
-keeps recent searches and saved ones (⌘S saves). Right-click a result for Open
-With, Open in Terminal, Rename, Move to Trash, or to exclude its folder from the
-index. The Opened column counts what you opened from Quoll; sort by it to get
-your most used files first. Folders show their total size. ⌘I opens index
-statistics (largest folders, file types). Settings (⌘,) holds the hotkey (with a
-recorder), open at login, external drives, the folders to index, excludes,
-includes and your own scopes.
+## Keyboard
 
-**Elsewhere.** Finder › Services › *Search in Quoll* searches inside the selected
-folder; `quoll://search?q=...` opens the window with a query; `quoll show "query"`
-(or opening the app again) does the same from a terminal or a remote session.
-
-**Build from source** (Command Line Tools are enough):
-
-```bash
-./scripts/make-signing-identity.sh   # optional: keeps Full Disk Access across rebuilds
-./scripts/build-app.sh               # .build/Quoll.app (host architecture)
-./scripts/release.sh                 # dist/Quoll-<version>-macos-universal.zip
-```
-
-Tagging `v<VERSION>` runs `.github/workflows/release.yml`, which builds the
-universal zip and publishes a GitHub release. With `DEVELOPER_ID_P12`,
-`DEVELOPER_ID_P12_PASSWORD`, `APPLE_ID`, `APPLE_TEAM_ID` and `APPLE_APP_PASSWORD`
-secrets set, it signs with the Developer ID and notarizes.
-
-## Requirements
-
-- macOS 13 or newer.
-- Swift toolchain with tools-version 5.9 or newer (Command Line Tools are enough).
-
-## Build
-
-```bash
-cd macos
-swift build -c release
-swift run quoll-selftest
-```
-
-## Quick start
-
-```bash
-# Scan the default roots (home and /Applications), or give explicit paths.
-swift run quoll scan
-
-# Search.
-swift run quoll find 'ending:swift starts:Package'
-
-# Inspect the catalog and service state.
-swift run quoll status
-
-# Run the background service and HTTP endpoint.
-swift run quoll serve --http --port 8484
-curl 'http://127.0.0.1:8484/search?q=ending:swift&json=1'
-```
-
-The CLI also ships inside the app: `/Applications/Quoll.app/Contents/MacOS/quoll-cli` (link it into your PATH as `quoll`).
+| Key | Action |
+| --- | --- |
+| Hotkey | show / hide the window |
+| Esc | hide |
+| ↑ ↓, PgUp PgDn, ⌘↑ ⌘↓ | move the selection (focus stays in the search field) |
+| Enter, double-click | open |
+| ⌘Enter | reveal in Finder |
+| ⌘Y | Quick Look |
+| ⌘C / ⌘⌥C | copy paths / names |
+| ⌘1 … ⌘9 | type filters (⌘9: My Files) |
+| ⌘S | save the current search |
+| ⌘L | back to the search field |
+| ⌘R | reindex |
+| ⌘I | index statistics |
+| ⌘, | settings |
+| ⌃⌘F | full screen |
 
 ## Query language
 
 | Syntax | Meaning |
 | --- | --- |
-| `foo bar` | both terms |
-| `foo\|bar` | either term |
-| `!foo`, `-foo` | exclude |
+| `foo bar` | both words |
+| `foo\|bar` | either word |
+| `!foo`, `-foo` | without |
 | `"foo bar"` | exact phrase |
-| `ending:swift` | file extension |
+| `*.pdf`, `report?.md` | wildcards over the whole name |
+| `ending:md`, `ending:jpg;png;heic` | extension, or any of a list |
 | `kind:file`, `kind:folder` | entry kind |
 | `bytes:>1mb`, `bytes:1kb..2mb` | size |
-| `changed:today`, `made:2024-01..2024-06` | timestamps |
-| `starts:Report`, `ends:.pdf` | name boundaries |
-| `under:src`, `parent:docs`, `path:clients` | folder (name or absolute path) / path |
-| `level:>2` | path depth |
-| `blank:` | empty files |
-| `pattern:^v[0-9]+` | regular expression |
-| `matchcase:`, `icase:` | case sensitivity |
-| `word:`, `anyword:` | whole-word matching |
-| `fullpath:`, `leafonly:` | match full path or name |
-| `exact:` | exact name |
+| `changed:today`, `changed:2025`, `changed:>=2026-11-01`, `made:2025-01..2025-06` | modified / created; a year or month is the whole period |
+| `starts:Report`, `ends:.pdf`, `exact:package.json` | name boundaries |
+| `under:~/Projects`, `under:src` | inside an absolute folder / any folder with that name |
+| `parent:docs` | direct parent folder |
+| `path:clients/acme`, `fullpath:src/main` | full path contains / full-path text |
+| `level:>3`, `blank:`, `chars:>40` | depth, empty files, name length |
+| `pattern:^v[0-9]+`, `word:test`, `matchcase:README` | regex, whole word, case-sensitive |
+| `scope:user`, `scope:<name>` | saved query |
+
+`scope:user` = `under:~ !under:~/Library !path:/. !path:.photoslibrary/` (your own
+files). Define more in Settings or in `settings.json`:
+`"scopes": {"work": "under:~/Repos ending:md"}`.
 
 Full reference: [docs/QUERY.md](docs/QUERY.md).
 
-## Layout
+## Command line
 
-```
-docs/                  Architecture, query language, protocol, roadmap
-macos/
-  Sources/QuollCore/   IndexStore, BulkScanner, watcher, query engine, control, web
-  Sources/quoll/       CLI
-  Sources/QuollApp/    Menu-bar app
-  Sources/QuollSelfTest/
-scripts/               App bundle and launchd helpers
-```
-
-## Data
-
-All data lives under `~/Library/Application Support/Quoll`:
-
-```
-settings.json          roots, excludes, includes, web settings
-index -> index-<n>/    current snapshot (memory-mapped column files)
-quoll.sock             control socket (mode 0600)
-```
-
-Deleting the directory resets Quoll; the next start rescans. Excludes and
-includes:
+The CLI ships inside the app (`/Applications/Quoll.app/Contents/MacOS/quoll-cli`;
+Homebrew links it as `quoll`). It asks the running app over its socket, or maps
+the last index read-only when the app is closed.
 
 ```bash
-quoll settings --include ~/Library/Caches/com.example   # index one excluded folder
-quoll settings --include node_modules                    # stop excluding a name
-quoll settings --no-default-excludes                     # index everything
+quoll find --paths --limit 20 'invoice ending:pdf'                       # one path per line
+quoll find --json --limit 40 --sort modified --descending -- 'scope:user kind:file'
+quoll find --paths --sort opened -- 'scope:user'                          # most opened first
+quoll show 'under:~/Downloads changed:today'                              # open the window
+quoll status
+quoll settings --exclude ~/Downloads/old --include node_modules
+quoll settings --hotkey super+s --open-at-login on --external-drives on
+quoll scan ~/Projects ~/Documents                                         # change roots and rescan
+quoll export 'ending:pdf' --format csv --output pdfs.csv
 ```
 
-## Status
+`--json` returns `{query, count, total, tookMS, truncated, warnings, results:
+[{path, name, isDirectory, size, modified, created, accessed, fileExtension,
+level, mount, openCount?}]}`; unknown filters are reported in `warnings`. A query
+starting with `-` needs `--` before it. Socket and HTTP: [docs/PROTOCOL.md](docs/PROTOCOL.md).
 
-Roadmap milestones M0–M4 (benchmark, waste fixes, column store, search engine,
-durable change tracking) are done; see [docs/ROADMAP.md](docs/ROADMAP.md).
-Run the checks with `swift run -c release quoll-selftest`, plus
-`--bench <root> [--queries]`, `--equiv <root>` and `--m4`.
+## Settings and data
+
+Everything lives in `~/Library/Application Support/Quoll`:
+
+```
+settings.json      roots, excludes, includes, scopes, hotkey, openAtLogin,
+                   indexExternalVolumes, useDefaultExcludes, http
+index -> index-n/  current index (memory-mapped column files)
+volumes/<uuid>/    indexes of external drives
+opened.json        open counts (top 500)
+quoll.sock         control socket (mode 0600)
+```
+
+Quoll reads file names and metadata only, never file contents, and makes no
+network connections (the optional HTTP endpoint is off by default). Deleting the
+folder resets Quoll; the next start rescans.
+
+## Build from source
+
+Command Line Tools are enough (no Xcode).
+
+```bash
+./scripts/make-signing-identity.sh   # optional: a local signing identity keeps Full Disk Access across rebuilds
+./scripts/build-app.sh               # .build/Quoll.app for this Mac
+./scripts/release.sh                 # dist/Quoll-<version>-macos-universal.zip
+```
+
+Tests and benchmarks:
+
+```bash
+cd macos
+swift run -c release quoll-selftest                            # unit checks
+swift run -c release quoll-selftest --bench ~ --queries        # scan, load and query timings
+swift run -c release quoll-selftest --equiv ~/Projects         # new engine vs. reference matcher
+swift run -c release quoll-selftest --m4                       # FSEvents replay and live updates
+swift run -c release quoll-selftest --volumes <writable.dmg>   # external-drive index
+```
+
+Pushing a `v<VERSION>` tag builds the universal zip and publishes a GitHub
+release (`.github/workflows/release.yml`). With `DEVELOPER_ID_P12`,
+`DEVELOPER_ID_P12_PASSWORD`, `APPLE_ID`, `APPLE_TEAM_ID` and
+`APPLE_APP_PASSWORD` it signs with a Developer ID and notarizes; with `TAP_TOKEN`
+it updates the Homebrew tap.
+
+## Documentation
+
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — index layout, scanner, change tracking, search engine
+- [docs/DECISIONS.md](docs/DECISIONS.md) — every measured design decision
+- [docs/QUERY.md](docs/QUERY.md) — query language
+- [docs/PROTOCOL.md](docs/PROTOCOL.md) — socket and HTTP
+- [docs/ROADMAP.md](docs/ROADMAP.md) — what is done and what is next
+
+## Requirements
+
+macOS 13 or newer; Apple silicon or Intel.
 
 ## License
 
