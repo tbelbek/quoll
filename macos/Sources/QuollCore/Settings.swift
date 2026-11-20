@@ -36,6 +36,9 @@ public struct Preferences: Codable, Sendable {
     public var followSymlinks: Bool
     /// Apply `ExcludeRules.defaults` on top of `excludes`.
     public var useDefaultExcludes: Bool
+    /// Global hotkey that shows/hides the search window, e.g. `hyper+s` (⌃⌥⇧⌘S),
+    /// `control+option+space`, `cmd+shift+f`.
+    public var hotkey: String
 
     public init(
         roots: [String],
@@ -48,7 +51,8 @@ public struct Preferences: Codable, Sendable {
         skipHidden: Bool = false,
         skipPackages: Bool = false,
         followSymlinks: Bool = false,
-        useDefaultExcludes: Bool = true
+        useDefaultExcludes: Bool = true,
+        hotkey: String = "hyper+s"
     ) {
         self.roots = roots
         self.excludes = excludes
@@ -61,11 +65,12 @@ public struct Preferences: Codable, Sendable {
         self.skipPackages = skipPackages
         self.followSymlinks = followSymlinks
         self.useDefaultExcludes = useDefaultExcludes
+        self.hotkey = hotkey
     }
 
     private enum CodingKeys: String, CodingKey {
         case roots, excludes, includes, dataDirectory, controlPath, http, defaultLimit
-        case skipHidden, skipPackages, followSymlinks, useDefaultExcludes
+        case skipHidden, skipPackages, followSymlinks, useDefaultExcludes, hotkey
     }
 
     // Tolerant decoding: settings files written by older versions lack newer keys.
@@ -83,6 +88,7 @@ public struct Preferences: Codable, Sendable {
         skipPackages = try c.decodeIfPresent(Bool.self, forKey: .skipPackages) ?? false
         followSymlinks = try c.decodeIfPresent(Bool.self, forKey: .followSymlinks) ?? false
         useDefaultExcludes = try c.decodeIfPresent(Bool.self, forKey: .useDefaultExcludes) ?? true
+        hotkey = try c.decodeIfPresent(String.self, forKey: .hotkey) ?? "hyper+s"
     }
 
     /// Effective exclude rules: user rules, shipped defaults, and Quoll's own data

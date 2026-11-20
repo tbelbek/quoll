@@ -282,6 +282,34 @@ do {
     expect(false, "settings decode: \(error)")
 }
 
+// Result pager: bounded page cache, stale replies dropped
+do {
+    var deferred: [(QueryOptions, (QueryResult?) -> Void)] = []
+    func page(_ o: QueryOptions) -> QueryResult {
+        let rows = (o.offset..<min(o.offset + o.limit, 5_000)).map { entry("/tmp/r\($0)") }
+        return QueryResult(query: o.query, count: rows.count, total: 5_000, tookMS: 1, truncated: true, results: rows)
+    }
+    let pager = ResultPager(pageSize: 200, cap: 10_000, maxPages: 3) { options, _, _, reply in
+        deferred.append((options, reply))
+    }
+    pager.search("old", sort: .modified, ascending: false)
+    let stale = deferred.removeFirst()
+    pager.search("new", sort: .modified, ascending: false)
+    stale.1(page(stale.0))
+    expect(pager.total == 0, "pager: stale reply dropped")
+    let fresh = deferred.removeFirst()
+    fresh.1(page(fresh.0))
+    expect(pager.total == 5_000 && pager.rowCount == 5_000, "pager: current reply accepted")
+    for row in stride(from: 0, to: 5_000, by: 150) {
+        _ = pager.entry(at: row)
+        while !deferred.isEmpty { let (o, reply) = deferred.removeFirst(); reply(page(o)) }
+        expect(pager.cachedPages <= 3, "pager: at most 3 pages cached (row \(row))")
+    }
+    expect(pager.entry(at: 4_999)?.path == "/tmp/r4999", "pager: row maps to its entry")
+    pager.dropCache()
+    expect(pager.cachedPages == 0, "pager: hide drops the cache")
+}
+
 // IPC round trip
 do {
     let root = try makeTree(["control.txt": 1])

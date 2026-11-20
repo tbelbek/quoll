@@ -1,312 +1,172 @@
-import SwiftUI
-import Combine
 import AppKit
 import QuollCore
 
+/// Menu-bar app with an Everything-style search panel and a global hotkey.
+/// AppKit only: no SwiftUI scene machinery in a process that idles in the background.
 @main
-struct QuollApp: App {
-    @StateObject private var model = AppModel()
-
-    init() {
+enum QuollMain {
+    static func main() {
         ScanHelper.runIfRequested()
-    }
-
-    var body: some Scene {
-        MenuBarExtra("Quoll", systemImage: "magnifyingglass") {
-            SearchView(model: model)
-                .frame(width: 720, height: 460)
-        }
-        .menuBarExtraStyle(.window)
+        let app = NSApplication.shared
+        let delegate = AppDelegate()
+        app.delegate = delegate
+        app.setActivationPolicy(.accessory)   // no Dock icon, no ⌘Tab entry
+        app.run()
     }
 }
 
-final class AppModel: ObservableObject {
-    @Published var query: String = ""
-    @Published var results: [FileEntry] = []
-    @Published var total: Int = 0
-    @Published var tookMS: Double = 0
-    @Published var statusText: String = "starting…"
-    @Published var selected: FileEntry?
-    @Published var warnings: [String] = []
-
-    private(set) var settings: Preferences?
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate {
+    private var settings = Preferences.default()
     private var service: QuollService?
-    private var client: ControlClient?
-    private var searchWorkItem: DispatchWorkItem?
-    private let queue = DispatchQueue(label: "quoll.app", qos: .userInitiated)
+    private var backend: SearchBackend?
+    private var panel: SearchPanel?
+    private var controller: SearchController?
+    private var statusItem: NSStatusItem?
+    private var hotKey: HotKey?
+    private let countItem = NSMenuItem(title: "starting…", action: nil, keyEquivalent: "")
+    private let showItem = NSMenuItem(title: "Show Quoll", action: #selector(togglePanel), keyEquivalent: "")
 
-    init() {
-        start()
-    }
-
-    func start() {
-        queue.async { [weak self] in
-            guard let self else { return }
-            do {
-                let settings = try Preferences.load()
-                DispatchQueue.main.async {
-                    self.settings = settings
-                    self.statusText = "connecting…"
-                }
-
-                let client = ControlClient(controlPath: settings.controlPath)
-                if client.isAvailable() {
-                    DispatchQueue.main.async {
-                        self.client = client
-                        self.statusText = "connected to service"
-                    }
-                    self.refreshStatus()
-                    self.performSearch()
-                    return
-                }
-
-                let service = QuollService(settings: settings)
-                try service.start()
-                DispatchQueue.main.async {
-                    self.service = service
-                    self.client = nil
-                    self.statusText = "indexing…"
-                }
-                self.refreshStatus()
-                self.performSearch()
-            } catch {
-                DispatchQueue.main.async {
-                    self.statusText = "error: \(error.localizedDescription)"
-                }
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        NSApp.mainMenu = mainMenu()
+        setUpStatusItem()
+        do {
+            settings = try Preferences.load()
+        } catch {
+            countItem.title = "settings error: \(error.localizedDescription)"
+        }
+        backend = makeBackend()
+        if let backend {
+            let controller = SearchController(backend: backend)
+            controller.onHide = { [weak self] in self?.hidePanel() }
+            let panel = SearchPanel()
+            panel.contentViewController = controller
+            panel.delegate = self
+            panel.keyHandler = { [weak controller] event in controller?.handleKeyEquivalent(event) ?? false }
+            panel.setFrameAutosaveName("QuollSearch")
+            if !panel.setFrameUsingName("QuollSearch") {
+                panel.setContentSize(NSSize(width: 900, height: 520))
+                panel.center()
+            }
+            self.controller = controller
+            self.panel = panel
+        }
+        registerHotKey()
+        // QUOLL_SHOW=<query>: open the panel at launch (screenshots, manual testing).
+        if let query = ProcessInfo.processInfo.environment["QUOLL_SHOW"] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                self?.togglePanel()
+                self?.controller?.setQuery(query)
             }
         }
     }
 
-    func scheduleSearch() {
-        searchWorkItem?.cancel()
-        let item = DispatchWorkItem { [weak self] in
-            self?.performSearch()
-        }
-        searchWorkItem = item
-        queue.asyncAfter(deadline: .now() + 0.03, execute: item)
-    }
-
-    func performSearch() {
-        let query = self.query
-        if let client {
-            do {
-                let response = try client.send(ControlRequest(
-                    command: "search",
-                    query: query,
-                    limit: 500,
-                    sort: .name,
-                    ascending: true
-                ))
-                DispatchQueue.main.async {
-                    self.results = response.results ?? []
-                    self.total = response.total ?? 0
-                    self.tookMS = response.tookMS ?? 0
-                    self.warnings = response.warnings ?? []
-                    self.statusText = "\(self.total) results"
-                }
-            } catch {
-                DispatchQueue.main.async {
-                    self.statusText = "service error: \(error.localizedDescription)"
-                }
-            }
-            return
-        }
-
-        guard let service else { return }
-        let response = service.engine.search(
-            QueryOptions(query: query, limit: 500, sort: .name, ascending: true),
-            in: service.store,
-            cancellable: true
-        )
-        if response.warnings.contains("cancelled") { return }
-        DispatchQueue.main.async {
-            self.results = response.results
-            self.total = response.total
-            self.tookMS = response.tookMS
-            self.warnings = response.warnings
-            self.statusText = "\(self.total) results"
-        }
-    }
-
-    func refreshStatus() {
-        if let client {
-            if let response = try? client.send(ControlRequest(command: "status")),
-               let status = response.status {
-                DispatchQueue.main.async {
-                    self.statusText = "\(status.files) files · \(status.directories) folders"
-                }
-            }
-            return
-        }
-        guard let service else { return }
-        let status = service.status()
-        DispatchQueue.main.async {
-            self.statusText = "\(status.files) files · \(status.directories) folders"
-        }
-    }
-
-    func open(_ entry: FileEntry) {
-        if let client {
-            _ = try? client.send(ControlRequest(command: "open", path: entry.path))
-        } else {
-            NSWorkspace.shared.open(entry.url)
-        }
-    }
-
-    func reveal(_ entry: FileEntry) {
-        if let client {
-            _ = try? client.send(ControlRequest(command: "reveal", path: entry.path))
-        } else {
-            NSWorkspace.shared.activateFileViewerSelecting([entry.url])
-        }
-    }
-
-    func copyPath(_ entry: FileEntry) {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(entry.path, forType: .string)
-    }
-
-    func rebuild() {
-        statusText = "reindexing…"
-        queue.async { [weak self] in
-            guard let self else { return }
-            if let client = self.client {
-                _ = try? client.send(ControlRequest(command: "rebuild"))
-            } else if let service = self.service {
-                _ = service.rebuild()
-            }
-            self.refreshStatus()
-            self.performSearch()
-        }
-    }
-
-    func quit() {
+    func applicationWillTerminate(_ notification: Notification) {
         service?.stop()
-        NSApp.terminate(nil)
-    }
-}
-
-struct SearchView: View {
-    @ObservedObject var model: AppModel
-    @FocusState private var searchFocused: Bool
-
-    var body: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 8) {
-                Image(systemName: "magnifyingglass")
-                    .foregroundStyle(.secondary)
-                TextField("Search files and folders", text: $model.query)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 15))
-                    .focused($searchFocused)
-                    .onChange(of: model.query) { _ in
-                        model.scheduleSearch()
-                    }
-                    .onSubmit {
-                        model.performSearch()
-                    }
-                if !model.query.isEmpty {
-                    Button {
-                        model.query = ""
-                        model.performSearch()
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .padding(10)
-            .background(.bar)
-
-            Divider()
-
-            if model.results.isEmpty {
-                VStack(spacing: 8) {
-                    Image(systemName: "doc.text.magnifyingglass")
-                        .font(.system(size: 32))
-                        .foregroundStyle(.tertiary)
-                    Text(model.query.isEmpty ? "Type to search the index" : "No results")
-                        .foregroundStyle(.secondary)
-                    if !model.warnings.isEmpty {
-                        Text(model.warnings.joined(separator: "\n"))
-                            .font(.caption)
-                            .foregroundStyle(.orange)
-                    }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                List(model.results, selection: $model.selected) { entry in
-                    HStack(spacing: 8) {
-                        Image(systemName: entry.isDirectory ? "folder" : iconName(for: entry.fileExtension))
-                            .foregroundStyle(entry.isDirectory ? Color.accentColor : Color.secondary)
-                            .frame(width: 18)
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(entry.name)
-                                .lineLimit(1)
-                            Text((entry.path as NSString).deletingLastPathComponent)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                        }
-                        Spacer()
-                        if !entry.isDirectory {
-                            Text(entry.formattedSize)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    .padding(.vertical, 2)
-                    .contentShape(Rectangle())
-                    .onTapGesture(count: 2) {
-                        model.open(entry)
-                    }
-                    .contextMenu {
-                        Button("Open") { model.open(entry) }
-                        Button("Reveal in Finder") { model.reveal(entry) }
-                        Divider()
-                        Button("Copy Path") { model.copyPath(entry) }
-                    }
-                    .tag(entry)
-                }
-                .listStyle(.plain)
-            }
-
-            Divider()
-
-            HStack(spacing: 10) {
-                Text(model.statusText)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                if model.tookMS > 0 {
-                    Text("· \(String(format: "%.1f", model.tookMS)) ms")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                }
-                Spacer()
-                Button("Reindex") { model.rebuild() }
-                    .controlSize(.small)
-                Button("Quit") { model.quit() }
-                    .controlSize(.small)
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
-            .background(.bar)
-        }
-        .onAppear { searchFocused = true }
     }
 
-    private func iconName(for fileExtension: String) -> String {
-        switch fileExtension {
-        case "swift", "c", "h", "cpp", "hpp", "m", "mm": return "chevron.left.forwardslash.chevron.right"
-        case "md", "txt", "rtf": return "doc.text"
-        case "png", "jpg", "jpeg", "gif", "heic", "webp": return "photo"
-        case "mp3", "wav", "m4a", "flac": return "music.note"
-        case "mp4", "mov", "mkv", "avi": return "film"
-        case "zip", "gz", "tar", "7z", "rar": return "archivebox"
-        case "pdf": return "doc.richtext"
-        case "app": return "app"
-        default: return "doc"
+    /// Use a running `quoll serve` if there is one; otherwise host the service here
+    /// (one process, one TCC subject).
+    private func makeBackend() -> SearchBackend? {
+        let client = ControlClient(controlPath: settings.controlPath)
+        if client.isAvailable() { return SocketBackend(client: client) }
+        let service = QuollService(settings: settings)
+        do {
+            try service.start()
+        } catch {
+            countItem.title = "service error: \(error.localizedDescription)"
+            return nil
         }
+        self.service = service
+        return InProcessBackend(service: service)
+    }
+
+    private func registerHotKey() {
+        hotKey = HotKey(spec: settings.hotkey) { [weak self] in self?.togglePanel() }
+        if let hotKey {
+            showItem.title = "Show Quoll    \(hotKey.display)"
+        } else {
+            showItem.title = "Show Quoll    (hotkey “\(settings.hotkey)” unavailable)"
+        }
+    }
+
+    // MARK: Panel
+
+    @objc func togglePanel() {
+        guard let panel else { return }
+        if panel.isVisible && panel.isKeyWindow {
+            hidePanel()
+        } else {
+            NSApp.activate(ignoringOtherApps: true)
+            panel.makeKeyAndOrderFront(nil)
+            controller?.willShow()
+        }
+    }
+
+    private func hidePanel() {
+        guard let panel, panel.isVisible else { return }
+        panel.orderOut(nil)
+        controller?.didHide()
+        NSApp.hide(nil)   // give focus back to the previous app
+    }
+
+    /// Like Everything/Spotlight: clicking elsewhere dismisses the window.
+    func windowDidResignKey(_ notification: Notification) {
+        hidePanel()
+    }
+
+    // MARK: Menus
+
+    private func setUpStatusItem() {
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        item.button?.image = NSImage(systemSymbolName: "magnifyingglass", accessibilityDescription: "Quoll")
+        let menu = NSMenu()
+        menu.delegate = self
+        showItem.target = self
+        menu.addItem(showItem)
+        menu.addItem(.separator())
+        countItem.isEnabled = false
+        menu.addItem(countItem)
+        menu.addItem(withTitle: "Reindex", action: #selector(reindex), keyEquivalent: "").target = self
+        menu.addItem(withTitle: "Open settings.json", action: #selector(openSettings), keyEquivalent: "").target = self
+        menu.addItem(.separator())
+        menu.addItem(withTitle: "Quit Quoll", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        item.menu = menu
+        statusItem = item
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        guard let status = backend?.status() else { return }
+        let total = status.files + status.directories
+        countItem.title = total > 0 ? "\(total.formatted()) entries indexed" : "indexing…"
+    }
+
+    @objc private func reindex() { controller?.reindex() }
+
+    @objc private func openSettings() {
+        try? settings.save()
+        NSWorkspace.shared.open(URL(fileURLWithPath: (settings.dataDirectory as NSString).appendingPathComponent("settings.json")))
+    }
+
+    /// Accessory apps show no menu bar, but the field editor still needs the Edit
+    /// key equivalents (⌘A ⌘C ⌘V ⌘X ⌘Z).
+    private func mainMenu() -> NSMenu {
+        let main = NSMenu()
+        let appItem = NSMenuItem()
+        let appMenu = NSMenu()
+        appMenu.addItem(withTitle: "Quit Quoll", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appItem.submenu = appMenu
+        main.addItem(appItem)
+        let editItem = NSMenuItem()
+        let edit = NSMenu(title: "Edit")
+        edit.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        edit.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "Z")
+        edit.addItem(.separator())
+        edit.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editItem.submenu = edit
+        main.addItem(editItem)
+        return main
     }
 }
