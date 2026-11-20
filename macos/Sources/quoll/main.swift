@@ -148,11 +148,7 @@ private func commandSearch(_ arguments: [String], settings: Preferences) {
             )
             var withWarnings = search
             withWarnings.warnings = response.warnings ?? []
-            if has("--json", in: arguments) {
-                printJSON(withWarnings)
-            } else {
-                printTable(withWarnings)
-            }
+            printSearch(withWarnings, arguments)
             return
         } catch {
             printError("service unavailable, using archive: \(error.localizedDescription)")
@@ -161,8 +157,20 @@ private func commandSearch(_ arguments: [String], settings: Preferences) {
 
     let store = loadStore(settings)
     let response = QueryEngine().search(options, in: store)
+    printSearch(response, arguments)
+}
+
+/// --json, --paths (one path per line; count and warnings on stderr, for scripts
+/// and pipelines), or the human table.
+private func printSearch(_ response: QueryResult, _ arguments: [String]) {
     if has("--json", in: arguments) {
         printJSON(response)
+    } else if has("--paths", in: arguments) {
+        for entry in response.results { print(entry.path) }
+        var note = "\(response.total) results in \(String(format: "%.1f", response.tookMS)) ms"
+        if response.total > response.count { note += ", printed \(response.count) (raise --limit)" }
+        for warning in response.warnings { note += "; warning: \(warning)" }
+        printError(note)
     } else {
         printTable(response)
     }
@@ -455,7 +463,7 @@ private func usage() {
 
     USAGE
       quoll find <query> [--limit N] [--offset N] [--sort name|path|size|modified|created|extension|level]
-                          [--descending] [--json] [--pattern] [--exact-case]
+                          [--descending] [--json | --paths] [--pattern] [--exact-case]
       quoll scan [paths...] [--exclude PATTERN]
       quoll rebuild
       quoll status [--json]
