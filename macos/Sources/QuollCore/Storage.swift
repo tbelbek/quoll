@@ -160,12 +160,12 @@ final class MappedFile {
 
 // MARK: - Buffered column writer
 
-/// Appends to a file through a 256 KB buffer, so writing a snapshot never holds
+/// Appends to a file through a 64 KB buffer, so writing a snapshot never holds
 /// a column in memory.
 final class ColumnWriter {
     private let fd: Int32
     private let buffer: UnsafeMutableRawPointer
-    private let capacity = 256 * 1024
+    private let capacity = 64 * 1024
     private var used = 0
     private(set) var written = 0
     let path: String

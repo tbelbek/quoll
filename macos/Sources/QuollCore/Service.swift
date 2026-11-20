@@ -59,6 +59,10 @@ public final class QuollService {
     private var appliedEventId: UInt64 = 0
     public private(set) var lastScan: Date?
     public private(set) var replayDone = false
+    /// Full scans since start (tests: replay must not need one).
+    public private(set) var fullScans = 0
+    /// Seconds the last compaction took.
+    public private(set) var lastCompaction: TimeInterval = 0
 
     /// D6 in docs/DECISIONS.md: compact when the overlay holds this many changes, or
     /// after `compactIdle` seconds without events once the snapshot is `compactAge` old.
@@ -186,6 +190,7 @@ public final class QuollService {
     /// Full scan into a new generation, then swap it in. Runs on stateQueue.
     @discardableResult
     private func rebuildLocked(eventId: UInt64) -> BulkScanner.Stats {
+        fullScans += 1
         let directory = SnapshotLocation.fresh(in: settings.dataDirectory)
         var meta = SnapshotMeta()
         meta.eventId = eventId
@@ -193,12 +198,13 @@ public final class QuollService {
         do {
             let roots = settings.roots.filter { isDirectory($0) }
             meta.devices = roots.map(ChangeWatcher.volumeUUID(for:))
-            let stats = try IndexStore.scan(roots: roots, rules: settings.excludeRules, into: directory, meta: meta)
+            let stats = try ScanHelper.scan(roots: roots, settings: settings, into: directory, meta: meta)
             try store.write { try store.adopt(directory: directory) }
             try SnapshotLocation.publish(directory, in: settings.dataDirectory)
             appliedEventId = max(appliedEventId, eventId)
             lastScan = Date()
             lastSnapshotAt = Date()
+            Self.returnFreedMemory()
             return stats
         } catch {
             log("scan failed: \(error)")
@@ -218,11 +224,19 @@ public final class QuollService {
             try store.write { try store.adopt(directory: directory) }
             try SnapshotLocation.publish(directory, in: settings.dataDirectory)
             lastSnapshotAt = Date()
+            lastCompaction = Date().timeIntervalSince(started)
+            Self.returnFreedMemory()
             log("compacted (\(reason)): \(store.meta.count) entries in \(String(format: "%.2f", Date().timeIntervalSince(started)))s")
         } catch {
             log("compaction failed: \(error)")
             try? FileManager.default.removeItem(atPath: directory)
         }
+    }
+
+    /// Scans and compactions free their buffers, but malloc keeps the pages; hand
+    /// them back so the footprint drops to the steady state (D11).
+    static func returnFreedMemory() {
+        _ = malloc_zone_pressure_relief(nil, 0)
     }
 
     private func scheduleCompaction() {
@@ -272,8 +286,13 @@ public final class QuollService {
 
     // MARK: - Change reconciliation
 
+    private static let debug = ProcessInfo.processInfo.environment["QUOLL_DEBUG"] != nil
+
     private func apply(_ events: [ChangeEvent]) {
         guard !events.isEmpty else { return }
+        if Self.debug {
+            log("batch: \(events.count) events, first \(events[0].path) flags \(String(events[0].flags, radix: 16)) history-done \(events.contains(where: \.isHistoryDone))")
+        }
         let lastId = events.map(\.id).max() ?? 0
         if events.contains(where: \.isHistoryDone) { replayDone = true }
         if let event = events.first(where: \.requiresFullRescan) {
@@ -571,6 +590,7 @@ public final class QuollService {
             let options = QueryOptions(
                 query: query,
                 limit: limit,
+                offset: Int(request.query["offset"] ?? "") ?? 0,
                 sort: sort,
                 ascending: ascending
             )

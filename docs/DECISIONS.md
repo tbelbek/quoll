@@ -89,7 +89,8 @@ so per-event file ids add nothing. Fewer moving parts, no dependency on risk 2.
 
 ## D10 — Compaction policy
 
-Snapshot rewrite (streamed, ~1.5 s for 1.1M entries) happens on shutdown, when
+Snapshot rewrite (streamed; measured 0.4 s for 1.1M entries, 0.8 s for 2.3M)
+happens on shutdown, when
 the overlay reaches 20,000 changes, or after 5 idle minutes once the snapshot is
 6 hours old. Writing ~90 MB after every small batch would make idle disk writes
 non-zero; between snapshots a crash only means a longer FSEvents replay, which
@@ -118,3 +119,39 @@ is ±20% (swap nearly full).
 Known slow spot: `path:` rebuilds the full path for every candidate. A per-folder
 memo would fix it; deferred because the owner's priority is footprint and these
 queries stay well under 100 ms.
+
+## D11 — Full scans run in a helper process
+
+After a 1.1M-entry scan the service's footprint stayed at 34.6 MB although
+`heap` showed ~200 KB of live objects: the scan's malloc churn leaves dirty
+pages the allocator keeps, and `malloc_zone_pressure_relief(nil, 0)` returned
+nothing. A full scan now runs in the service's own executable started with
+`--quoll-scan-helper <request.json>`; the child writes the snapshot and exits,
+the service maps it. Service footprint after a full home scan: **38 MB → 3.6 MB**
+(5.6 MB after a round of queries). In-process fallback if the child cannot start.
+Subtree scans after FSEvents changes stay in-process (small).
+
+## D12 — Compaction memory
+
+Compaction peak/residue in a fresh process (1.1M / 2.3M entries): 14.4 / 23.1 MB.
+Changes: level-by-level breadth-first walk (only two levels of folders held), one
+reused child buffer, folder records streamed in id order, the inode permutation
+built from the written (mapped) table, column writer buffers 256 KB → 64 KB.
+Result: **6.4 / 8.1 MB**, and faster (0.41 / 0.81 s).
+
+## M4 results (2026-11-20, `quoll-selftest --m4`)
+
+10k new files, 1k deletes, 200 file moves, a folder move, a case-only folder
+rename and a folder delete made while Quoll was stopped: on restart the catalog
+equals a fresh scan after **1.4–1.6 s**, with no full rescan (FSEvents history
+replay). Live changes from another process (500 creates, a folder move, 100
+deletes, a new nested folder) converge in **1.4–1.6 s**. A compaction reloads to
+the identical tree.
+
+Real service on the owner's home (`quoll serve`, defaults, 1.41M entries): scan
+7.4–8.6 s in the helper; 90 s idle with 98 FSEvents batches from normal desktop
+activity cost 0.14 s CPU and zero snapshot writes.
+
+Open (roadmap risk 1): replay after days of sleep is untested; a gap that
+FSEvents can no longer replay arrives as dropped/wrapped flags and triggers a
+full rescan, so it costs time, not correctness.

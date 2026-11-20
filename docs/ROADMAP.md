@@ -40,6 +40,15 @@ Conclusions the plan rests on:
 - Default excludes (`.git`, `node_modules`) only take 2.3M down to 1.83M.
   Size the design for 2.3M; excludes are about battery and noise, not memory.
 
+## Status (2026-11-20)
+
+M0–M4 are done; measurements and the decisions taken on the way are in
+[DECISIONS.md](DECISIONS.md). Against the targets at 2.3M entries: scan 11.7 s,
+peak RSS 50 MB, snapshot 170 MB, cold start 3.4 ms, footprint 2–4 MB idle and
+≤ 17 MB while querying, substring p95 < 6 ms, empty query newest-first p95
+< 5 ms; replay of 10k offline changes in ~1.5 s without a rescan. Below `path:`
+(~50 ms at 2.3M) every query is well under target.
+
 ## M0 — Benchmark and oracle
 
 - `quoll-selftest --bench <root>` prints one TSV row: scan s, peak RSS

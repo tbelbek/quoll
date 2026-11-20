@@ -1,8 +1,13 @@
 import Foundation
 import QuollCore
 
+ScanHelper.runIfRequested()
+
 if CommandLine.arguments.contains("--bench") {
     exit(runBench(CommandLine.arguments))
+}
+if CommandLine.arguments.contains("--m4") {
+    exit(runDurability(CommandLine.arguments))
 }
 if CommandLine.arguments.contains("--equiv") {
     exit(runEquivalence(CommandLine.arguments))

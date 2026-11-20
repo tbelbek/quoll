@@ -1,117 +1,113 @@
 # Architecture
 
-Quoll is a per-user file search service with three front-ends:
+Quoll is a per-user filename index with three front-ends (CLI, menu-bar app,
+optional HTTP) talking to one service over a Unix socket. The design goal is the
+smallest footprint that still answers any query in milliseconds; the measured
+decisions behind it are in [DECISIONS.md](DECISIONS.md).
 
 ```
-                 ┌──────────────────────────────┐
-  quoll CLI ────▶│                              │
-  menu-bar app ─▶│        QuollService          │
-  HTTP clients ─▶│                              │
-                 └───────┬──────────┬───────────┘
-                         │          │
-                 ┌───────▼───┐  ┌───▼────────────┐
-                 │  Catalog  │  │  ChangeWatcher │
-                 └───────┬───┘  └───┬────────────┘
-                         │          │
-                 ┌───────▼──────────▼───────────┐
-                 │  Scanner (FileManager walk)  │
-                 └──────────────────────────────┘
+  quoll CLI ────┐
+  menu-bar app ─┼──▶ QuollService ──▶ QueryEngine ──▶ IndexStore (read lock)
+  HTTP clients ─┘         │                               ▲
+                          │ FSEvents batches               │ write lock
+                          ▼                               │
+                    ChangeWatcher ── reconcile (lstat) ───┘
+                          │
+                    full scan ──▶ scan helper process ──▶ BulkScanner ──▶ snapshot files
 ```
 
-## Components
+## Storage: `IndexStore`
 
-### `Scanner`
+A catalog is a **snapshot** (files on disk, mapped read-only) plus a small
+in-memory **overlay** of changes since the snapshot was written.
 
-Walks one or more roots with `FileManager.enumerator`, collecting `FileEntry`
-values: path, name, kind, byte size, timestamps, extension, depth and mount.
-The scanner handles excludes, hidden files, package descendants and symlinks.
-It returns `ScanResult` with entries, `ScanIssue` rows and a duration.
+Snapshot generation `<data>/index-<n>/`, pointed at by the `<data>/index`
+symlink (swapped atomically):
 
-### `Catalog`
+| File | Content |
+| --- | --- |
+| `folded.bin` / `folded.off` | folded names (NUL-terminated) and u32 start offsets |
+| `raw.bin` / `raw.off` | display names, same layout |
+| `parent.u32` | parent id (`UInt32.max` for roots) |
+| `mtime.u32`, `ctime.u32` | modification / creation time, seconds |
+| `size.u64` | logical size (0 for folders) |
+| `flags.u8` | folder, symlink |
+| `dirs.bin`, `dirs.inode` | per folder: child range + inode; permutation by inode |
+| `meta.json` | roots, FSEvents event id, volume UUIDs, rules fingerprint |
 
-Thread-safe, path-keyed collection of `FileEntry` values plus roots and the
-last scan date. It persists to `catalog.json` with an atomic write. The catalog
-is deliberately disposable: a missing or corrupt file is a rebuild, not an
-error.
+Invariants: roots are ids `0..<roots.count`; a folder's children are one
+contiguous id range sorted by (folded, raw) name; parents precede children.
+Path lookup is therefore a binary search per path component.
 
-Methods: `replaceAll`, `put`, `insert`, `remove`, `removeBranch`,
-`allEntries`, `entry(at:)`, `save`, `load`.
+Mapped pages are clean and file-backed: they do not count toward the process
+footprint and the kernel drops them under memory pressure instead of swapping.
 
-### `ChangeWatcher`
+The overlay holds appended entries, a tombstone bitset, and per base entry
+overrides for metadata, name and parent. A folder rename or move rewrites one
+entry; its subtree is untouched. Compaction writes the live tree breadth-first
+as a new snapshot (streamed to disk, ~0.4 s per million entries) and drops the
+overlay.
 
-Wraps an FSEvents stream for the active roots. Events are coalesced for a
-short debounce window and delivered as one batch of paths. The service then
-re-stats files and rescans changed directories.
+## Names: `Fold`
 
-### `QueryEngine` and `SearchParser`
+Case-insensitive matching uses a folded copy of every name: NFD, strip combining
+marks, lowercase, `ı` → `i` (locale-independent, so `İ I ı i` all match). ASCII
+names, the common case, take a byte fast path.
 
-`SearchParser` turns a query string into an expression tree of `Predicate`
-values. `Matcher` evaluates the tree against a `FileEntry`. `QueryEngine`
-filters the catalog, sorts the matches and applies offset/limit.
+## Scanning: `BulkScanner`
 
-The evaluator is independent of the storage layer, so it can be unit-tested
-with synthetic entries.
+`getattrlistbulk` returns name, type, times, flags, inode and size for a whole
+buffer of entries per syscall. Four workers share a folder stack; each reads one
+folder, sorts it, then appends it to the snapshot writer under one lock, so a
+folder's children land contiguously. Excluded folders are never opened; paths
+are only built when a path rule could match below the folder. Dataless
+(iCloud/File Provider) folders are skipped and materialisation is turned off for
+the process. A walk stays on the root's device and never follows symlinks.
 
-### `ControlServer` / `ControlClient`
+A **full scan** (first run, changed roots/rules/volume, FSEvents gap) runs in a
+child process (`--quoll-scan-helper`), so the scan's malloc churn never stays in
+the long-running service.
 
-A Unix-domain socket carrying one JSON object per line. It is the only local
-API: the CLI and the menu-bar app both use it. The socket is created with mode
-`0600` under the application-support directory.
+## Change tracking: `ChangeWatcher` + reconciliation
 
-### `WebServer`
+The FSEvents stream starts at the snapshot's event id, so everything that changed
+while Quoll was not running is replayed first (`HistoryDone` marks the end).
+Event flags are not trusted (they coalesce). Per batch, paths are deduplicated
+and handled parents first; each is `lstat`-ed:
 
-Optional HTTP endpoint built on `Network.framework`. It serves `/search`,
-`/status` and `/export`, plus static files from a configured root. Basic
-authentication is enabled when a username is set.
+- missing → deferred removal (end of batch), so a moved folder can be claimed
+- exists, indexed → metadata update; real on-disk name re-read (case renames)
+- exists, not indexed, folder whose inode is already known → move/rename
+- exists, not indexed → append; a new folder is walked into the overlay
 
-### `QuollService`
+`MustScanSubDirs` rescans that folder; dropped events, wrapped ids or a moved
+root trigger a full scan. Quoll's own writes are ignored (`IgnoreSelf`) and its
+data directory is always excluded.
 
-Owns the catalog, scanner, watcher and servers. It serializes scan and update
-work on a private queue, debounces catalog writes, and maps control requests
-to operations. `serve` starts the service; `QuollApp` either connects to an
-existing service or starts one in-process.
+## Search: `QueryEngine`
 
-## Concurrency
+`SearchParser` (unchanged since 1.0) produces an expression tree. The plan
+flattens it into reference-free buffers, because ARC traffic on shared objects
+dominated per-entry evaluation. Every term contributes a literal its folded name
+must contain; the longest one in the root (or a root AND) drives `memmem` over
+the name arena, and only hits are evaluated. Work is split into 32k-entry chunks
+across cores; each chunk keeps a bounded top-K heap. A newer interactive search
+cancels an older one.
 
-- `Catalog` guards its dictionary with a lock; reads are snapshots.
-- `QuollService` serializes scans and change batches on `stateQueue`.
-- Catalog persistence is debounced by two seconds after a change batch.
-- The control server handles each client on a concurrent queue; commands that
-  mutate the catalog synchronize with `stateQueue`.
+`under:` / `parent:` take a folder name or an absolute path; `path:` and
+`fullpath:` rebuild paths for candidates only.
 
-## Storage
+## Service: `QuollService`
 
-`catalog.json`:
+Owns the store, engine, watcher, control socket and optional HTTP server. All
+mutations run on one serial state queue under the store's write lock; queries
+take the read lock. Compaction runs on shutdown, at 20,000 pending changes, or
+when idle for 5 minutes once the snapshot is 6 hours old.
 
-```json
-{
-  "version": 1,
-  "roots": ["/Users/you"],
-  "lastScan": "2026-11-20T09:00:00Z",
-  "entries": [
-    {
-      "path": "/Users/you/Documents/report.pdf",
-      "name": "report.pdf",
-      "isDirectory": false,
-      "size": 48210,
-      "modified": "2026-11-19T18:04:00Z",
-      "created": "2026-11-01T11:30:00Z",
-      "accessed": "2026-11-19T18:04:00Z",
-      "fileExtension": "pdf",
-      "level": 4,
-      "mount": "/"
-    }
-  ]
-}
-```
+## Failure behaviour
 
-The format is intentionally simple and inspectable. A binary or memory-mapped
-catalog is on the roadmap; the JSON file is the compatibility baseline.
-
-## Failure behavior
-
-- Unreadable paths are recorded as `ScanIssue` and skipped.
-- A failed catalog write is logged; the in-memory catalog remains usable.
-- A missing FSEvents root is ignored; scanning still works.
+- Unreadable folders are counted and skipped.
+- A snapshot that does not match roots, rules or volumes is rescanned.
+- A failed snapshot write keeps the previous generation.
 - A stale socket file is unlinked on startup.
-- The HTTP server is opt-in and never starts unless `web.enabled` is true.
+- The HTTP server never starts unless `http.enabled` is true.

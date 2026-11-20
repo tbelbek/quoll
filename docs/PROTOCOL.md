@@ -1,7 +1,8 @@
 # Local protocol
 
 Quoll exposes one Unix-domain socket. The socket path defaults to
-`~/Library/Application Support/Quoll/quoll.sock`, is created with mode `0600`,
+`~/Library/Application Support/Quoll/quoll.sock`, is chmod-ed to `0600` right after `bind` (the data
+directory itself is per-user),
 and carries one JSON object per line in each direction.
 
 ## Request
@@ -27,13 +28,17 @@ and carries one JSON object per line in each direction.
 | `ping` | — | health check, replies `pong` |
 | `search` | `query`, `limit`, `offset`, `sort`, `ascending` | run a query |
 | `status` | — | catalog and service status |
-| `scan` | `paths` | scan paths and replace the catalog |
+| `scan` | `paths` | make `paths` the roots and rescan; empty `paths` rescans the current roots |
 | `rebuild` | — | rescan the configured roots |
 | `forget` | `path` | remove a path and its subtree |
 | `open` | `path` | open with the default application |
 | `reveal` | `path` | reveal in Finder |
 | `export` | `query`, `format` | return JSON, CSV or TSV text |
 | `stop` | — | stop the service |
+
+`scan` and `rebuild` reply immediately (`scan started`) and run in the
+background; poll `status` (`lastScan`, counts) to see the result. A full scan
+runs in a short-lived helper process, so the service's memory does not grow.
 
 ## Reply
 
@@ -75,7 +80,7 @@ Errors:
 }
 ```
 
-Codes: `bad_request`, `unknown_command`, `unavailable`, `internal`.
+Codes: `bad_request`, `unknown_command`, `unavailable`.
 
 ## HTTP
 

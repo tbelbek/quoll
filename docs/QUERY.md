@@ -43,8 +43,8 @@ whole-name wildcard unless another mode is selected.
 | `leaf:` | `leaf:README` | match the name only |
 | `fullpath:` | `fullpath:src` | match the full path |
 | `path:` | `path:clients` | path contains |
-| `under:` | `under:src` | inside a folder subtree |
-| `parent:` | `parent:src` | direct parent folder |
+| `under:` | `under:src`, `under:~/Projects` | inside a folder subtree (folder name anywhere, or absolute path) |
+| `parent:` | `parent:src`, `parent:/tmp` | direct parent folder (name or absolute path) |
 | `level:` | `level:>3` | path depth |
 
 ### Size
@@ -87,6 +87,7 @@ the access time.
 | `icase:` | case-insensitive matching |
 | `leafonly:` | match the name, not the path |
 | `fullpath:` | match the full path |
+| `anyword:` | turn `word:` off again |
 | `blank:` | empty files |
 
 Modifiers can be standalone (`matchcase: report`) or carry the term
@@ -101,9 +102,16 @@ instead of turning it into a literal filename match.
 ## Matching rules
 
 - Default matching is case- and diacritic-insensitive substring matching on the
-  file name.
+  file name. Names are folded once at index time (NFD, marks stripped, lowercase,
+  `ı` → `i`), so `istanbul` finds `İSTANBUL` and `irmak` finds `ırmak`; wildcards,
+  `word:` and `path:` use the same folding.
 - Wildcards match the whole name.
 - `pattern:` uses ICU regular expressions and searches anywhere in the name
   unless the pattern anchors itself.
 - `word:` requires a non-word character (or string boundary) on both sides.
 - Filters are ANDed with the text term in the same token.
+- A bare year or month is a single day: `changed:2025` means 1 January 2025.
+  Use a range for the whole year: `changed:2025-01-01..2025-12-31`.
+- `chars:<n>` filters by name length; `plain:` turns `pattern:` off again.
+- On the command line, a query that starts with `-` needs `--` first:
+  `quoll find -- -draft`.

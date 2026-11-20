@@ -72,12 +72,17 @@ final class SnapshotWriter: ScanSink {
     let directory: String
     private let folded, foldedOff, raw, rawOff, parent, mtime, ctime, size, flags: ColumnWriter
     private var dirs: [DirRecord] = []
+    /// Compaction emits folders in id order: stream them instead of buffering.
+    private let dirsWriter: ColumnWriter?
+    private var streamedDirs = 0
     private(set) var count: UInt32 = 0
     private var files = 0, folders = 0
 
-    init(directory: String) throws {
+    init(directory: String, foldersInOrder: Bool = false) throws {
         self.directory = directory
         try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
+        dirsWriter = foldersInOrder
+            ? try ColumnWriter(path: (directory as NSString).appendingPathComponent("dirs.bin")) : nil
         func column(_ name: String) throws -> ColumnWriter {
             try ColumnWriter(path: (directory as NSString).appendingPathComponent(name))
         }
@@ -112,7 +117,13 @@ final class SnapshotWriter: ScanSink {
     }
 
     func appendDirectory(entry: UInt32, childStart: UInt32, childCount: UInt32, inode: UInt64) {
-        dirs.append(DirRecord(entry: entry, childStart: childStart, childCount: childCount, inode: inode))
+        let record = DirRecord(entry: entry, childStart: childStart, childCount: childCount, inode: inode)
+        if let dirsWriter {
+            dirsWriter.append(record)
+            streamedDirs += 1
+        } else {
+            dirs.append(record)
+        }
     }
 
     func appendChildren(of parent: UInt32, inode: UInt64, batch: ScanBatch) -> UInt32 {
@@ -133,11 +144,22 @@ final class SnapshotWriter: ScanSink {
         for column in [folded, foldedOff, raw, rawOff, parent, mtime, ctime, size, flags] {
             try column.finish()
         }
-        dirs.sort { $0.entry < $1.entry }
-        let dirsWriter = try ColumnWriter(path: (directory as NSString).appendingPathComponent("dirs.bin"))
-        dirs.withUnsafeBytes { dirsWriter.append($0.baseAddress!, count: $0.count) }
-        try dirsWriter.finish()
-        let byInode = (0..<UInt32(dirs.count)).sorted { dirs[Int($0)].inode < dirs[Int($1)].inode }
+        let dirsPath = (directory as NSString).appendingPathComponent("dirs.bin")
+        if let dirsWriter {
+            try dirsWriter.finish()
+        } else {
+            dirs.sort { $0.entry < $1.entry }
+            let writer = try ColumnWriter(path: dirsPath)
+            dirs.withUnsafeBytes { writer.append($0.baseAddress!, count: $0.count) }
+            try writer.finish()
+            dirs = []
+        }
+        // Inode order from the written (mapped, clean) table: only the u32
+        // permutation lives on the heap.
+        let table = try MappedFile(path: dirsPath)
+        let records = table.typed(DirRecord.self)
+        var byInode = Array(0..<UInt32(table.count(of: DirRecord.self)))
+        byInode.sort { records[Int($0)].inode < records[Int($1)].inode }
         let inodeWriter = try ColumnWriter(path: (directory as NSString).appendingPathComponent("dirs.inode"))
         byInode.withUnsafeBytes { inodeWriter.append($0.baseAddress!, count: $0.count) }
         try inodeWriter.finish()
@@ -148,7 +170,6 @@ final class SnapshotWriter: ScanSink {
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         try encoder.encode(meta).write(to: URL(fileURLWithPath: (directory as NSString).appendingPathComponent("meta.json")))
-        dirs = []
     }
 }
 
@@ -432,6 +453,13 @@ public final class IndexStore {
     /// Live children of a folder.
     public func children(of d: Int) -> [Int] {
         var out: [Int] = []
+        appendChildren(of: d, to: &out)
+        return out
+    }
+
+    /// Appends the live children of `d` to `out` (reusable buffer).
+    public func appendChildren(of d: Int, to out: inout [Int]) {
+        let mark = out.count
         if let di = dirIndex(d) {
             let record = bDirs[di]
             let start = Int(record.childStart)
@@ -440,12 +468,11 @@ public final class IndexStore {
             }
         }
         if let extra = added[UInt32(d)] {
-            var seen = Set<UInt32>()
-            for c in extra where !dead.test(Int(c)) && parent(Int(c)) == d && seen.insert(c).inserted {
+            for c in extra where !dead.test(Int(c)) && parent(Int(c)) == d
+                && !out[mark...].contains(Int(c)) {
                 out.append(Int(c))
             }
         }
-        return out
     }
 
     public func inode(ofDirectory d: Int) -> UInt64? {
@@ -600,31 +627,33 @@ public final class IndexStore {
     /// Writes the live tree as a new snapshot (breadth-first, children sorted), streaming
     /// straight to disk. Caller holds at least the read lock and blocks mutations.
     public func writeSnapshot(to directory: String, meta newMeta: SnapshotMeta) throws {
-        let writer = try SnapshotWriter(directory: directory)
-        var queue: [(old: Int, new: UInt32)] = []
+        let writer = try SnapshotWriter(directory: directory, foldersInOrder: true)
+        // Level by level: only the current and the next level of folders are held.
+        var level: [(old: Int, new: UInt32)] = []
         for r in 0..<rootCount where !dead.test(r) {
             let id = writer.appendEntry(parent: Self.none, raw: raw(r), folded: folded(r), flags: flags(r), meta: meta(r))
-            queue.append((r, id))
+            level.append((r, id))
         }
-        var head = 0
-        while head < queue.count {
-            let (old, new) = queue[head]
-            head += 1
-            let kids = children(of: old).sorted { a, b in
-                let c = Self.compare(folded(a), folded(b))
-                return c != 0 ? c < 0 : Self.compare(raw(a), raw(b)) < 0
+        var next: [(old: Int, new: UInt32)] = []
+        var kids: [Int] = []
+        while !level.isEmpty {
+            for (old, new) in level {
+                kids.removeAll(keepingCapacity: true)
+                appendChildren(of: old, to: &kids)
+                kids.sort { a, b in
+                    let c = Self.compare(folded(a), folded(b))
+                    return c != 0 ? c < 0 : Self.compare(raw(a), raw(b)) < 0
+                }
+                let start = writer.count
+                for k in kids {
+                    let id = writer.appendEntry(parent: new, raw: raw(k), folded: folded(k), flags: flags(k), meta: meta(k))
+                    if isDirectory(k) { next.append((k, id)) }
+                }
+                writer.appendDirectory(entry: new, childStart: start, childCount: writer.count - start,
+                                       inode: inode(ofDirectory: old) ?? 0)
             }
-            let start = writer.count
-            for k in kids {
-                let id = writer.appendEntry(parent: new, raw: raw(k), folded: folded(k), flags: flags(k), meta: meta(k))
-                if isDirectory(k) { queue.append((k, id)) }
-            }
-            writer.appendDirectory(entry: new, childStart: start, childCount: writer.count - start,
-                                   inode: inode(ofDirectory: old) ?? 0)
-            if head > 4096 {
-                queue.removeFirst(head)
-                head = 0
-            }
+            swap(&level, &next)
+            next.removeAll(keepingCapacity: true)
         }
         var m = newMeta
         m.roots = meta.roots

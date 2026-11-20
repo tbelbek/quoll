@@ -46,6 +46,9 @@ func runBench(_ arguments: [String]) -> Int32 {
         return 1
     }
     let afterScan = Footprint.current()
+    _ = malloc_zone_pressure_relief(nil, 0)
+    print("footprint_after_scan\t\(mb(afterScan.now))")
+    print("footprint_after_scan_relief\t\(mb(Footprint.current().now))")
     let bytes = (try? FileManager.default.contentsOfDirectory(atPath: snapshot))?.reduce(0) { total, name in
         let attributes = try? FileManager.default.attributesOfItem(atPath: (snapshot as NSString).appendingPathComponent(name))
         return total + ((attributes?[.size] as? NSNumber)?.intValue ?? 0)
@@ -96,6 +99,16 @@ func benchLoad(_ snapshot: String, queries: Bool) -> Int32 {
     print("load_ms\t\(String(format: "%.1f", Date().timeIntervalSince(loadStart) * 1000))")
     print("footprint_process_start\t\(mb(start))")
     print("footprint_after_load\t\(mb(Footprint.current().now))")
+    if CommandLine.arguments.contains("--compact") {
+        let target = snapshot + "-compacted"
+        defer { try? FileManager.default.removeItem(atPath: target) }
+        let started = Date()
+        do { try store.read { try store.writeSnapshot(to: target, meta: store.meta) } } catch { print("compact failed: \(error)") }
+        print("compact_s\t\(String(format: "%.2f", Date().timeIntervalSince(started)))")
+        print("footprint_peak_after_compact\t\(mb(Footprint.current().peak))")
+        _ = malloc_zone_pressure_relief(nil, 0)
+        print("footprint_after_compact\t\(mb(Footprint.current().now))")
+    }
     if queries {
         benchQueries(store)
         print("footprint_after_queries\t\(mb(Footprint.current().now))")
@@ -165,4 +178,135 @@ func runEquivalence(_ arguments: [String]) -> Int32 {
         }
     }
     return mismatches == 0 ? 0 : 1
+}
+
+/// `quoll-selftest --m4 [count]`: durable change tracking against real FSEvents.
+/// Quit, change the tree, start again: within 5 s the catalog must equal a fresh
+/// scan, without a full rescan. Then the same for live changes.
+func runDurability(_ arguments: [String]) -> Int32 {
+    let fm = FileManager.default
+    let n = arguments.firstIndex(of: "--m4").flatMap { i in i + 1 < arguments.count ? Int(arguments[i + 1]) : nil } ?? 10_000
+    // Short base path: Unix socket paths are limited to 104 bytes.
+    let base = (NSHomeDirectory() as NSString).appendingPathComponent(".qm4-\(getpid())")
+    let root = base + "/root", data = base + "/data"
+    defer { try? fm.removeItem(atPath: base) }
+    var failed = 0
+    func check(_ ok: Bool, _ name: String) { print("\(ok ? "ok  " : "FAIL") \(name)"); if !ok { failed += 1 } }
+    func touch(_ path: String) { fm.createFile(atPath: path, contents: Data("x".utf8)) }
+
+    do {
+        for d in 0..<50 { try fm.createDirectory(atPath: "\(root)/d\(d)/sub", withIntermediateDirectories: true) }
+        for i in 0..<(n / 5) { touch("\(root)/d\(i % 50)/seed\(i).txt") }
+        try fm.createDirectory(atPath: "\(root)/Mover/inner/deep", withIntermediateDirectories: true)
+        for i in 0..<200 { touch("\(root)/Mover/inner/deep/m\(i).txt") }
+        try fm.createDirectory(atPath: "\(root)/CaseDir", withIntermediateDirectories: true)
+        touch("\(root)/CaseDir/c.txt")
+        try fm.createDirectory(atPath: "\(root)/Doomed/a/b", withIntermediateDirectories: true)
+        for i in 0..<300 { touch("\(root)/Doomed/a/b/x\(i).txt") }
+    } catch {
+        print("fixture failed: \(error)")
+        return 1
+    }
+
+    var settings = Preferences.default()
+    settings.roots = [root]
+    settings.dataDirectory = data
+    settings.controlPath = data + "/q.sock"
+
+    func freshPaths() -> Set<String> {
+        let snapshot = base + "/fresh-\(UUID().uuidString)"
+        defer { try? fm.removeItem(atPath: snapshot) }
+        guard (try? IndexStore.scan(roots: [root], rules: settings.excludeRules, into: snapshot, meta: SnapshotMeta())) != nil
+        else { return [] }
+        let store = IndexStore()
+        try? store.write { try store.adopt(directory: snapshot) }
+        return store.read { Set((0..<store.count).filter { !store.isDead($0) }.map { store.path($0) }) }
+    }
+    func livePaths(_ service: QuollService) -> Set<String> {
+        let store = service.store
+        return store.read { Set((0..<store.count).filter { !store.isDead($0) }.map { store.path($0) }) }
+    }
+    func waitUntil(_ seconds: TimeInterval, _ condition: () -> Bool) -> TimeInterval? {
+        let start = Date()
+        while Date().timeIntervalSince(start) < seconds {
+            if condition() { return Date().timeIntervalSince(start) }
+            usleep(50_000)
+        }
+        return nil
+    }
+
+    // 1. First start: full scan, then quit (writes the snapshot + event id).
+    let first = QuollService(settings: settings)
+    do { try first.start() } catch { print("start failed: \(error)"); return 1 }
+    first.drain()
+    check(first.fullScans == 1, "first start scans once")
+    check(livePaths(first) == freshPaths(), "initial catalog equals a fresh scan")
+    first.stop()
+
+    // 2. Changes while Quoll is not running.
+    for i in 0..<n { touch("\(root)/d\(i % 50)/new\(i).txt") }
+    for i in stride(from: 0, to: n / 5, by: 2) { try? fm.removeItem(atPath: "\(root)/d\(i % 50)/seed\(i).txt") }
+    for i in stride(from: 1, to: n / 5, by: 10) {
+        try? fm.moveItem(atPath: "\(root)/d\(i % 50)/seed\(i).txt", toPath: "\(root)/d\((i + 7) % 50)/sub/moved\(i).txt")
+    }
+    try? fm.moveItem(atPath: "\(root)/Mover/inner", toPath: "\(root)/d3/sub/inner-renamed")
+    try? fm.moveItem(atPath: "\(root)/CaseDir", toPath: "\(root)/casedir")
+    try? fm.removeItem(atPath: "\(root)/Doomed")
+    let expected = freshPaths()
+
+    // 3. Second start: load snapshot, replay FSEvents history.
+    let started = Date()
+    let second = QuollService(settings: settings)
+    do { try second.start() } catch { print("restart failed: \(error)"); return 1 }
+    let caughtUp = waitUntil(10) { second.replayDone && { second.drain(); return livePaths(second) == expected }() }
+    let elapsed = Date().timeIntervalSince(started)
+    check(second.fullScans == 0, "restart did not rescan")
+    check(caughtUp != nil, "replay converged to a fresh scan (\(String(format: "%.2f", elapsed)) s, \(expected.count) entries)")
+    check(caughtUp.map { $0 < 5 } ?? false, "replay within 5 s")
+    if caughtUp == nil {
+        let live = livePaths(second)
+        for p in expected.subtracting(live).sorted().prefix(5) { print("      missing: \(p)") }
+        for p in live.subtracting(expected).sorted().prefix(5) { print("      extra:   \(p)") }
+    }
+    let movedFolder = second.store.read { second.store.resolve(root + "/d3/sub/inner-renamed/deep/m7.txt") }
+    check(movedFolder != nil, "moved folder found at its new path")
+
+    // 4. Live changes while running, from another process: the stream ignores
+    //    Quoll's own writes (kFSEventStreamCreateFlagIgnoreSelf).
+    let script = """
+    cd '\(root)'
+    for i in $(seq 0 499); do : > d$((i % 50))/live$i.txt; done
+    mv d3/sub/inner-renamed d4/back
+    for i in $(seq 0 99); do rm -f d$((i % 50))/new$i.txt; done
+    mkdir -p fresh/one/two && : > fresh/one/two/f.txt
+    """
+    let shell = Process()
+    shell.executableURL = URL(fileURLWithPath: "/bin/zsh")
+    shell.arguments = ["-c", script]
+    try? shell.run()
+    shell.waitUntilExit()
+    let liveExpected = freshPaths()
+    let liveTime = waitUntil(10) { second.drain(); return livePaths(second) == liveExpected }
+    check(liveTime != nil, "live changes converge (\(liveTime.map { String(format: "%.2f", $0) } ?? "timeout") s)")
+    if liveTime == nil {
+        let live = livePaths(second)
+        for p in liveExpected.subtracting(live).sorted().prefix(5) { print("      missing: \(p)") }
+        for p in live.subtracting(liveExpected).sorted().prefix(5) { print("      extra:   \(p)") }
+        print("      counts: live \(live.count) expected \(liveExpected.count)")
+    }
+    check(second.fullScans == 0, "live changes did not rescan")
+
+    // 5. Compaction keeps the live view; reload equals it.
+    let before = livePaths(second)
+    second.stop()
+    print("compaction\t\(String(format: "%.3f", second.lastCompaction)) s for \(before.count) entries")
+    let third = QuollService(settings: settings)
+    do { try third.start(performInitialScan: false) } catch { print("third start failed: \(error)"); return 1 }
+    _ = waitUntil(5) { third.replayDone }
+    third.drain()
+    check(livePaths(third) == before, "snapshot after compaction reloads the same tree")
+    third.stop()
+
+    print(failed == 0 ? "\nm4 checks passed" : "\n\(failed) m4 check(s) failed")
+    return failed == 0 ? 0 : 1
 }

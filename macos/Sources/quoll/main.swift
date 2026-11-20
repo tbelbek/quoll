@@ -3,6 +3,8 @@ import AppKit
 import Darwin
 import QuollCore
 
+ScanHelper.runIfRequested()
+
 private let stderr = FileHandle.standardError
 
 private func fail(_ message: String) -> Never {

@@ -7,6 +7,10 @@ import QuollCore
 struct QuollApp: App {
     @StateObject private var model = AppModel()
 
+    init() {
+        ScanHelper.runIfRequested()
+    }
+
     var body: some Scene {
         MenuBarExtra("Quoll", systemImage: "magnifyingglass") {
             SearchView(model: model)

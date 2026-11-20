@@ -4,6 +4,11 @@ Fast, local file search for macOS. Quoll keeps a warm catalog of your disks and
 answers filename queries in milliseconds, with a menu-bar app, a CLI and a
 small local service that other tools can query.
 
+Measured on a MacBook Air, whole home folder (2.3M entries): full scan 11.7 s,
+170 MB snapshot on disk, start-up 3.4 ms, service footprint ~4 MB idle and up to
+~17 MB while searching, substring queries < 6 ms. Dot-folders are indexed
+(Spotlight skips them). Details: [docs/DECISIONS.md](docs/DECISIONS.md).
+
 macOS has Spotlight, but it is optimized for content and metadata search and
 does not behave like a filename index you can query instantly, filter with a
 boolean expression, or script over a stable local protocol. Quoll fills that
@@ -11,7 +16,10 @@ gap.
 
 ## Features
 
-- Warm filename catalog with incremental updates from FSEvents.
+- Memory-mapped catalog with incremental FSEvents updates, including changes
+  made while Quoll was not running.
+- Default excludes (`.git`, `node_modules`, `.Trash`, `.cache`,
+  `~/Library/Caches`, `~/Library/CloudStorage`); includes override them.
 - Boolean queries, quoted phrases, wildcards, regex and property filters.
 - Sort by name, path, size, timestamps, extension or depth.
 - CLI (`quoll`), menu-bar app and JSON/CSV/TSV export.
@@ -22,7 +30,7 @@ gap.
 ## Requirements
 
 - macOS 13 or newer.
-- Swift 6 toolchain (Command Line Tools are enough).
+- Swift toolchain with tools-version 5.9 or newer (Command Line Tools are enough).
 
 ## Build
 
@@ -69,7 +77,7 @@ open .build/Quoll.app
 | `bytes:>1mb`, `bytes:1kb..2mb` | size |
 | `changed:today`, `made:2024-01..2024-06` | timestamps |
 | `starts:Report`, `ends:.pdf` | name boundaries |
-| `under:src`, `path:clients` | folder / path |
+| `under:src`, `parent:docs`, `path:clients` | folder (name or absolute path) / path |
 | `level:>2` | path depth |
 | `blank:` | empty files |
 | `pattern:^v[0-9]+` | regular expression |
@@ -85,7 +93,7 @@ Full reference: [docs/QUERY.md](docs/QUERY.md).
 ```
 docs/                  Architecture, query language, protocol, roadmap
 macos/
-  Sources/QuollCore/   Catalog, scanner, watcher, query engine, control, web
+  Sources/QuollCore/   IndexStore, BulkScanner, watcher, query engine, control, web
   Sources/quoll/       CLI
   Sources/QuollApp/    Menu-bar app
   Sources/QuollSelfTest/
@@ -97,18 +105,26 @@ scripts/               App bundle and launchd helpers
 All data lives under `~/Library/Application Support/Quoll`:
 
 ```
-settings.json          roots, excludes, web settings
-catalog.json           file catalog
+settings.json          roots, excludes, includes, web settings
+index -> index-<n>/    current snapshot (memory-mapped column files)
 quoll.sock             control socket (mode 0600)
 ```
 
-Deleting the directory resets Quoll; the next scan rebuilds the catalog.
+Deleting the directory resets Quoll; the next start rescans. Excludes and
+includes:
+
+```bash
+quoll settings --include ~/Library/Caches/com.example   # index one excluded folder
+quoll settings --include node_modules                    # stop excluding a name
+quoll settings --no-default-excludes                     # index everything
+```
 
 ## Status
 
-The core is working end to end: scan, query, live updates, CLI, menu-bar app,
-control socket and HTTP. See [docs/ROADMAP.md](docs/ROADMAP.md) for what is
-next.
+Roadmap milestones M0–M4 (benchmark, waste fixes, column store, search engine,
+durable change tracking) are done; see [docs/ROADMAP.md](docs/ROADMAP.md).
+Run the checks with `swift run -c release quoll-selftest`, plus
+`--bench <root> [--queries]`, `--equiv <root>` and `--m4`.
 
 ## License
 
