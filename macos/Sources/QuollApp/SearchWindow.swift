@@ -40,25 +40,27 @@ final class SocketBackend: SearchBackend {
     func rebuild() { _ = try? client.send(ControlRequest(command: "rebuild")) }
 }
 
-/// Borderless key panel: no Dock icon, no ⌘Tab entry, floats over the active Space.
-final class SearchPanel: NSPanel {
+/// The search window: a normal titled window (movable, resizable, full screen
+/// via the green button or ⌃⌘F) that the hotkey shows and hides. The app stays
+/// an accessory app: no Dock icon, no ⌘Tab entry.
+final class SearchPanel: NSWindow {
     var keyHandler: ((NSEvent) -> Bool)?
+    var onEscape: (() -> Void)?
+
+    /// Esc anywhere in the window (field, table, header) hides it.
+    override func cancelOperation(_ sender: Any?) { onEscape?() }
 
     init() {
         super.init(contentRect: NSRect(x: 0, y: 0, width: 900, height: 520),
-                   styleMask: [.titled, .fullSizeContentView, .resizable, .nonactivatingPanel],
+                   styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                    backing: .buffered, defer: true)
+        title = "Quoll"
         titleVisibility = .hidden
         titlebarAppearsTransparent = true
         isMovableByWindowBackground = true
-        level = .floating
-        collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
-        hidesOnDeactivate = false
+        collectionBehavior = [.fullScreenPrimary, .moveToActiveSpace]
         isReleasedWhenClosed = false
         minSize = NSSize(width: 480, height: 240)
-        for button in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
-            standardWindowButton(button)?.isHidden = true
-        }
     }
 
     override var canBecomeKey: Bool { true }
@@ -92,6 +94,7 @@ final class SearchController: NSViewController, NSTableViewDataSource, NSTableVi
     private var iconCache: [String: NSImage] = [:]
     private var indexed = 0
     var onHide: (() -> Void)?
+    var onSettings: (() -> Void)?
 
     private static let home = NSHomeDirectory()
     private let timeFormatter: DateFormatter = { let f = DateFormatter(); f.dateFormat = "HH:mm"; return f }()
@@ -167,7 +170,7 @@ final class SearchController: NSViewController, NSTableViewDataSource, NSTableVi
         root.addSubview(statusLabel)
         root.addSubview(warningLabel)
         NSLayoutConstraint.activate([
-            field.topAnchor.constraint(equalTo: root.topAnchor, constant: 12),
+            field.topAnchor.constraint(equalTo: root.topAnchor, constant: 32),
             field.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),
             field.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
             scroll.topAnchor.constraint(equalTo: field.bottomAnchor, constant: 8),
@@ -433,6 +436,7 @@ final class SearchController: NSViewController, NSTableViewDataSource, NSTableVi
             field.currentEditor()?.selectAll(nil)
         case (.command, "r", _): reindex()
         case (.command, "w", _): onHide?()
+        case (.command, ",", _): onSettings?()
         default: return false
         }
         return true

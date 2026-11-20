@@ -38,10 +38,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         if let backend {
             let controller = SearchController(backend: backend)
             controller.onHide = { [weak self] in self?.hidePanel() }
+            controller.onSettings = { [weak self] in self?.openSettings() }
             let panel = SearchPanel()
             panel.contentViewController = controller
             panel.delegate = self
             panel.keyHandler = { [weak controller] event in controller?.handleKeyEquivalent(event) ?? false }
+            panel.onEscape = { [weak self] in self?.hidePanel() }
             panel.setFrameAutosaveName("QuollSearch")
             if !panel.setFrameUsingName("QuollSearch") {
                 panel.setContentSize(NSSize(width: 900, height: 520))
@@ -93,7 +95,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     @objc func togglePanel() {
         guard let panel else { return }
-        if panel.isVisible && panel.isKeyWindow {
+        if panel.isVisible && panel.isKeyWindow && NSApp.isActive {
             hidePanel()
         } else {
             NSApp.activate(ignoringOtherApps: true)
@@ -104,21 +106,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     private func hidePanel() {
         guard let panel, panel.isVisible else { return }
+        if panel.styleMask.contains(.fullScreen) {
+            // Ordering out a full-screen window leaves an empty Space; hide the app.
+            NSApp.hide(nil)
+            return
+        }
         panel.orderOut(nil)
         controller?.didHide()
         NSApp.hide(nil)   // give focus back to the previous app
     }
 
-    /// Like Everything/Spotlight: clicking elsewhere dismisses the window.
-    func windowDidResignKey(_ notification: Notification) {
+    /// The close button hides; the window and its frame stay for the next hotkey.
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
         hidePanel()
+        return false
     }
 
     // MARK: Menus
 
     private func setUpStatusItem() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        item.button?.image = NSImage(systemSymbolName: "magnifyingglass", accessibilityDescription: "Quoll")
+        let image = NSImage(systemSymbolName: "doc.text.magnifyingglass", accessibilityDescription: "Quoll")
+        image?.isTemplate = true   // follows light/dark menu bar
+        item.button?.image = image
+        item.button?.toolTip = "Quoll"
+        item.autosaveName = "QuollStatusItem"
         let menu = NSMenu()
         menu.delegate = self
         showItem.target = self
@@ -127,7 +139,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         countItem.isEnabled = false
         menu.addItem(countItem)
         menu.addItem(withTitle: "Reindex", action: #selector(reindex), keyEquivalent: "").target = self
-        menu.addItem(withTitle: "Open settings.json", action: #selector(openSettings), keyEquivalent: "").target = self
+        menu.addItem(withTitle: "Settings…", action: #selector(openSettings), keyEquivalent: ",").target = self
         menu.addItem(.separator())
         menu.addItem(withTitle: "Quit Quoll", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         item.menu = menu
@@ -142,9 +154,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     @objc private func reindex() { controller?.reindex() }
 
+    private var settingsWindow: SettingsWindow?
+
     @objc private func openSettings() {
-        try? settings.save()
-        NSWorkspace.shared.open(URL(fileURLWithPath: (settings.dataDirectory as NSString).appendingPathComponent("settings.json")))
+        let window = settingsWindow ?? SettingsWindow(settings: settings) { [weak self] updated in self?.apply(updated) }
+        settingsWindow = window
+        window.load(settings)
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    /// Saves and applies settings: hotkey immediately, roots/rules by a rescan.
+    private func apply(_ updated: Preferences) {
+        settings = updated
+        if let service {
+            DispatchQueue.global(qos: .utility).async { [weak self] in
+                service.update(settings: updated)
+                DispatchQueue.main.async { self?.controller?.willShow() }
+            }
+        } else {
+            // A separate `quoll serve` reads settings at start.
+            try? updated.save()
+        }
+        hotKey = nil
+        registerHotKey()
     }
 
     /// Accessory apps show no menu bar, but the field editor still needs the Edit
@@ -156,6 +189,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         appMenu.addItem(withTitle: "Quit Quoll", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appItem.submenu = appMenu
         main.addItem(appItem)
+        appMenu.insertItem(withTitle: "Settings…", action: #selector(openSettings), keyEquivalent: ",", at: 0)
+        appMenu.items.first?.target = self
+        let viewItem = NSMenuItem()
+        let viewMenu = NSMenu(title: "View")
+        let full = viewMenu.addItem(withTitle: "Enter Full Screen", action: #selector(NSWindow.toggleFullScreen(_:)), keyEquivalent: "f")
+        full.keyEquivalentModifierMask = [.control, .command]
+        viewItem.submenu = viewMenu
         let editItem = NSMenuItem()
         let edit = NSMenu(title: "Edit")
         edit.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
@@ -167,6 +207,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         editItem.submenu = edit
         main.addItem(editItem)
+        main.addItem(viewItem)
         return main
     }
 }

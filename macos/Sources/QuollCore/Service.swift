@@ -292,6 +292,21 @@ public final class QuollService {
         }
     }
 
+    /// Applies new settings live: saves them, and when roots or rules changed,
+    /// rescans (in the helper process) and restarts the watcher. Blocks for the
+    /// length of a rescan; call off the main thread.
+    public func update(settings new: Preferences) {
+        stateQueue.sync {
+            let before = fingerprint
+            settings = new
+            try? settings.save()
+            guard fingerprint != before else { return }
+            let id = ChangeWatcher.currentEventId
+            rebuildLocked(eventId: id)
+            startWatcher(since: id)
+        }
+    }
+
     /// Blocks until all queued change batches have been applied (tests, CLI).
     public func drain() {
         stateQueue.sync {}

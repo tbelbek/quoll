@@ -4,3 +4,4 @@ macos/.build/
 *.sock
 catalog.json
 settings.json
+dist/

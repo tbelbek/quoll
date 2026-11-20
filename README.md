@@ -27,6 +27,44 @@ gap.
 - Optional HTTP endpoint with Basic authentication.
 - Per-user data, no network access required.
 
+## Install
+
+**Download.** Grab `Quoll-<version>-macos-universal.zip` from
+[Releases](https://github.com/tbelbek/quoll/releases), unzip, move `Quoll.app` to
+`/Applications`. Unless the release notes say it is notarized, macOS quarantines
+apps from the internet; clear that once:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/Quoll.app
+```
+
+**First launch.**
+
+1. Open Quoll; a magnifier icon appears in the menu bar (on a notched MacBook it
+   may hide behind the notch when the bar is full).
+2. Grant **Full Disk Access** (System Settings › Privacy & Security › Full Disk
+   Access › add Quoll), otherwise macOS asks folder by folder and the first scan
+   waits for each answer.
+3. Press the hotkey: **Hyper+S** (⌃⌥⇧⌘S) by default — change it in Settings (⌘,),
+   e.g. `control+option+space` or `cmd+shift+f`.
+
+**Window.** Type to search; ↑/↓ select, Enter opens, ⌘Enter reveals in Finder,
+⌘C copies paths, ⌘⌥C names, Esc hides, ⌃⌘F full screen. Click a column header to
+sort. Settings (⌘,) holds the hotkey, the folders to index, excludes and includes.
+
+**Build from source** (Command Line Tools are enough):
+
+```bash
+./scripts/make-signing-identity.sh   # optional: keeps Full Disk Access across rebuilds
+./scripts/build-app.sh               # .build/Quoll.app (host architecture)
+./scripts/release.sh                 # dist/Quoll-<version>-macos-universal.zip
+```
+
+Tagging `v<VERSION>` runs `.github/workflows/release.yml`, which builds the
+universal zip and publishes a GitHub release. With `DEVELOPER_ID_P12`,
+`DEVELOPER_ID_P12_PASSWORD`, `APPLE_ID`, `APPLE_TEAM_ID` and `APPLE_APP_PASSWORD`
+secrets set, it signs with the Developer ID and notarizes.
+
 ## Requirements
 
 - macOS 13 or newer.
@@ -57,12 +95,7 @@ swift run quoll serve --http --port 8484
 curl 'http://127.0.0.1:8484/search?q=ending:swift&json=1'
 ```
 
-The menu-bar app:
-
-```bash
-./scripts/build-app.sh
-open .build/Quoll.app
-```
+The CLI also ships inside the app: `/Applications/Quoll.app/Contents/MacOS/quoll`.
 
 ## Query language
 

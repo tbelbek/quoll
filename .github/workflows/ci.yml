@@ -1,0 +1,16 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: cd macos && swift build -c release
+      - name: Self-test
+        run: cd macos && swift run -c release quoll-selftest
+      - name: App bundle
+        run: ./scripts/build-app.sh
