@@ -122,7 +122,8 @@ func benchQueries(_ store: IndexStore) {
     let engine = QueryEngine()
     let queries = ["", "kanelbulle", "*.md", "ending:md", "path:.config json", "report draft", "README",
                    "path:Repos/quoll", "fullpath:src/main", "under:Repos ending:swift",
-                   "ending:pdf;doc;docx;txt;md;rtf;pages;xls;xlsx;csv;ppt;pptx;key;numbers"]
+                   "ending:pdf;doc;docx;txt;md;rtf;pages;xls;xlsx;csv;ppt;pptx;key;numbers",
+                   "under:~ !under:~/Library !path:/. ending:md", "kind:file under:~ !under:~/Library !path:/."]
     for sort in [SortKey.name, SortKey.modified] {
         for query in queries {
             var samples: [Double] = []
@@ -341,6 +342,30 @@ func runDurability(_ arguments: [String]) -> Int32 {
     third.drain()
     check(livePaths(third) == before, "snapshot after compaction reloads the same tree")
     third.stop()
+
+    // 5b. Rule changes apply incrementally (no full scan) and match a fresh scan.
+    let incremental = QuollService(settings: settings)
+    do { try incremental.start(performInitialScan: false) } catch { print("incremental start failed: \(error)"); return 1 }
+    _ = waitUntil(5) { incremental.replayDone }
+    incremental.drain()
+    let scansBefore = incremental.fullScans
+    var narrower = settings
+    narrower.excludes = [root + "/d2", "sub"]
+    incremental.update(settings: narrower)
+    settings.excludes = narrower.excludes
+    check(incremental.fullScans == scansBefore, "adding excludes did not rescan")
+    check(livePaths(incremental) == freshPaths(), "after adding excludes the catalog equals a fresh scan")
+    var wider = narrower
+    wider.excludes = ["sub"]
+    incremental.update(settings: wider)
+    settings.excludes = wider.excludes
+    check(incremental.fullScans == scansBefore, "removing a path exclude did not rescan")
+    check(livePaths(incremental) == freshPaths(), "after removing a path exclude the catalog equals a fresh scan")
+    wider.excludes = []
+    incremental.update(settings: wider)
+    settings.excludes = []
+    check(livePaths(incremental) == freshPaths(), "removing a name exclude (full scan) is still correct")
+    incremental.stop()
 
     // 6. A root inside an excluded area (.cache), given through a symlink.
     let inner = base + "/area/.cache/proj"

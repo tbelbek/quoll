@@ -12,6 +12,8 @@ public struct FileEntry: Codable, Hashable, Sendable, Identifiable {
     public var fileExtension: String
     public var level: Int
     public var mount: String
+    /// Times opened from Quoll (absent when never).
+    public var openCount: Int?
 
     public var id: String { path }
 
@@ -85,6 +87,8 @@ public enum SortKey: String, Codable, CaseIterable, Sendable {
     case accessed
     case fileExtension
     case level
+    /// Most opened from Quoll first (then newest).
+    case opened
 }
 
 public struct QueryOptions: Codable, Sendable {

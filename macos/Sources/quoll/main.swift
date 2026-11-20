@@ -156,7 +156,7 @@ private func commandSearch(_ arguments: [String], settings: Preferences) {
     }
 
     let store = loadStore(settings)
-    let response = QueryEngine().search(options, in: store)
+    let response = localEngine(settings).search(options, in: store)
     printSearch(response, arguments)
 }
 
@@ -217,6 +217,13 @@ private func commandScan(_ arguments: [String], settings: Preferences) {
     } catch {
         fail("unable to save index: \(error)")
     }
+}
+
+/// Engine with the user's scopes (no service running).
+private func localEngine(_ settings: Preferences) -> QueryEngine {
+    let engine = QueryEngine()
+    engine.setScopes(Preferences.builtInScopes.merging(settings.scopes) { _, user in user })
+    return engine
 }
 
 /// Maps the current snapshot read-only (no service running).
@@ -332,7 +339,7 @@ private func commandExport(_ arguments: [String], settings: Preferences) {
 
 private func exportLocally(query: String, format: ReportFormat, settings: Preferences) -> Data {
     let store = loadStore(settings)
-    let response = QueryEngine().search(
+    let response = localEngine(settings).search(
         QueryOptions(query: query, limit: 0, sort: .path, ascending: true),
         in: store
     )
@@ -474,7 +481,7 @@ private func usage() {
     quoll — macOS filename search
 
     USAGE
-      quoll find <query> [--limit N] [--offset N] [--sort name|path|size|modified|created|extension|level]
+      quoll find <query> [--limit N] [--offset N] [--sort name|path|size|modified|created|extension|level|opened]
                           [--descending] [--json | --paths] [--pattern] [--exact-case]
       quoll scan [paths...] [--exclude PATTERN]
       quoll rebuild
@@ -489,7 +496,7 @@ private func usage() {
                      [--no-default-excludes] [--default-excludes]
                      [--open-at-login on|off] [--external-drives on|off]   applied when the app starts
                      [--hotkey SPEC]   e.g. super+s (⌃⌥⌘S), hyper+s (⌃⌥⇧⌘S); restart the app
-      quoll show        bring up the search window (Quoll.app must be running)
+      quoll show [query]   bring up the search window (Quoll.app must be running)
       quoll help
 
     GLOBAL
@@ -533,7 +540,8 @@ let rest = Array(arguments.dropFirst())
 switch command {
 case "show":
     let client = ControlClient(controlPath: openSettings(dataDirectory: dataDirectory).controlPath)
-    guard let reply = try? client.send(ControlRequest(command: "show")), reply.ok else {
+    let showQuery = rest.isEmpty ? nil : rest.joined(separator: " ")
+    guard let reply = try? client.send(ControlRequest(command: "show", query: showQuery)), reply.ok else {
         fail("Quoll.app is not running")
     }
     print(reply.message ?? "shown")

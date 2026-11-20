@@ -64,7 +64,7 @@ final class HotKey {
         return (key, modifiers, display + keyLabel)
     }
 
-    private static let keys: [String: UInt32] = {
+    static let keys: [String: UInt32] = {
         var map: [String: UInt32] = ["space": UInt32(kVK_Space), "return": UInt32(kVK_Return), "tab": UInt32(kVK_Tab)]
         let letters: [(String, Int)] = [
             ("a", kVK_ANSI_A), ("b", kVK_ANSI_B), ("c", kVK_ANSI_C), ("d", kVK_ANSI_D), ("e", kVK_ANSI_E),

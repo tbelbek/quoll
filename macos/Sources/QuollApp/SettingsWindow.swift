@@ -14,13 +14,18 @@ final class SettingsWindow: NSWindow {
     private let atLogin = NSButton(checkboxWithTitle: "Open Quoll at login", target: nil, action: nil)
     private let externalDrives = NSButton(checkboxWithTitle: "Index external drives while they are connected", target: nil, action: nil)
     private let loginNote = NSTextField(labelWithString: "")
+    private let scopes = SettingsWindow.textArea()
+    private let record = NSButton(title: "Record…", target: nil, action: nil)
+    private var recorder: Any?
+    var pauseHotKey: (() -> Void)?
+    var resumeHotKey: (() -> Void)?
     private let onSave: (Preferences) -> Void
     private var base: Preferences
 
     init(settings: Preferences, onSave: @escaping (Preferences) -> Void) {
         self.onSave = onSave
         base = settings
-        super.init(contentRect: NSRect(x: 0, y: 0, width: 560, height: 560),
+        super.init(contentRect: NSRect(x: 0, y: 0, width: 560, height: 680),
                    styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: true)
         title = "Quoll Settings"
         isReleasedWhenClosed = false
@@ -51,9 +56,13 @@ final class SettingsWindow: NSWindow {
 
         loginNote.font = .systemFont(ofSize: 11)
         loginNote.textColor = .secondaryLabelColor
+        record.target = self
+        record.action = #selector(recordHotKey)
+        let hotkeyRow = NSStackView(views: [hotkeyField, record])
+        hotkeyRow.orientation = .horizontal
         let stack = NSStackView(views: [
             atLogin, loginNote, externalDrives,
-            label("Global hotkey"), hotkeyField,
+            label("Global hotkey"), hotkeyRow,
             hint("e.g. super+s (⌃⌥⌘S), hyper+s (⌃⌥⇧⌘S), control+option+space, cmd+shift+f"), hotkeyNote,
             label("Folders to index (one per line)"), roots.scroll,
             label("Exclude (one per line)"), excludes.scroll,
@@ -61,6 +70,8 @@ final class SettingsWindow: NSWindow {
             defaults,
             label("Always include (one per line)"), includes.scroll,
             hint("Overrides any exclude, e.g. ~/Library/Caches/com.example or node_modules."),
+            label("Scopes (name = query, one per line)"), scopes.scroll,
+            hint("Use as scope:name in a query or from the filter menu. Built in: scope:user (your own files)."),
             buttons
         ])
         stack.orientation = .vertical
@@ -68,12 +79,13 @@ final class SettingsWindow: NSWindow {
         stack.spacing = 6
         stack.edgeInsets = NSEdgeInsets(top: 16, left: 16, bottom: 16, right: 16)
         stack.translatesAutoresizingMaskIntoConstraints = false
-        for view in [hotkeyField, roots.scroll, excludes.scroll, includes.scroll, buttons] {
+        for view in [hotkeyRow, roots.scroll, excludes.scroll, includes.scroll, scopes.scroll, buttons] {
             view.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -32).isActive = true
         }
         roots.scroll.heightAnchor.constraint(equalToConstant: 56).isActive = true
         excludes.scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 80).isActive = true
         includes.scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 56).isActive = true
+        scopes.scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 56).isActive = true
         let content = NSView()
         content.addSubview(stack)
         NSLayoutConstraint.activate([
@@ -93,6 +105,7 @@ final class SettingsWindow: NSWindow {
         roots.text.string = settings.roots.joined(separator: "\n")
         excludes.text.string = settings.excludes.joined(separator: "\n")
         includes.text.string = settings.includes.joined(separator: "\n")
+        scopes.text.string = settings.scopes.sorted { $0.key < $1.key }.map { "\($0.key) = \($0.value)" }.joined(separator: "\n")
         defaults.state = settings.useDefaultExcludes ? .on : .off
         externalDrives.state = settings.indexExternalVolumes ? .on : .off
         refreshLoginState()
@@ -142,6 +155,12 @@ final class SettingsWindow: NSWindow {
         updated.includes = lines(includes)
         updated.useDefaultExcludes = defaults.state == .on
         updated.indexExternalVolumes = externalDrives.state == .on
+        updated.scopes = lines(scopes).reduce(into: [:]) { result, line in
+            guard let eq = line.firstIndex(of: "=") else { return }
+            let name = line[..<eq].trimmingCharacters(in: .whitespaces).lowercased()
+            let query = line[line.index(after: eq)...].trimmingCharacters(in: .whitespaces)
+            if !name.isEmpty, !query.isEmpty, !name.contains(" ") { result[name] = query }
+        }
         if updated.roots.isEmpty { updated.roots = base.roots }
         applyLogin()
         updated.openAtLogin = atLogin.state == .on
@@ -151,7 +170,53 @@ final class SettingsWindow: NSWindow {
         orderOut(nil)
     }
 
-    @objc private func cancelClicked() { orderOut(nil) }
+    @objc private func cancelClicked() {
+        stopRecording()
+        orderOut(nil)
+    }
+
+    // MARK: Hotkey recorder
+
+    @objc private func recordHotKey() {
+        if recorder != nil { stopRecording(); return }
+        pauseHotKey?()   // the current hotkey must not fire while recording
+        record.title = "Press keys…"
+        hotkeyNote.stringValue = "Press the new shortcut (with ⌃ ⌥ ⇧ ⌘), or Esc to cancel."
+        hotkeyNote.textColor = .secondaryLabelColor
+        recorder = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self else { return event }
+            if event.keyCode == 53 { self.stopRecording(); return nil }   // Esc
+            if let spec = Self.spec(for: event) {
+                self.hotkeyField.stringValue = spec
+                self.hotkeyNote.stringValue = "Recorded \(HotKey.parse(spec)?.2 ?? spec). Save to apply."
+                self.stopRecording()
+            }
+            return nil
+        }
+    }
+
+    private func stopRecording() {
+        if let recorder { NSEvent.removeMonitor(recorder) }
+        recorder = nil
+        record.title = "Record…"
+        resumeHotKey?()
+    }
+
+    /// `super`/`hyper` when ⌃⌥⌘ (+⇧) are all down, else explicit modifiers.
+    static func spec(for event: NSEvent) -> String? {
+        let flags = event.modifierFlags.intersection([.control, .option, .shift, .command])
+        guard !flags.isEmpty, let key = HotKey.keys.first(where: { $0.value == UInt32(event.keyCode) })?.key else { return nil }
+        var parts: [String] = []
+        if flags.isSuperset(of: [.control, .option, .command]) {
+            parts.append(flags.contains(.shift) ? "hyper" : "super")
+        } else {
+            if flags.contains(.control) { parts.append("control") }
+            if flags.contains(.option) { parts.append("option") }
+            if flags.contains(.shift) { parts.append("shift") }
+            if flags.contains(.command) { parts.append("cmd") }
+        }
+        return (parts + [key]).joined(separator: "+")
+    }
 
     private static func textArea() -> (scroll: NSScrollView, text: NSTextView) {
         let scroll = NSTextView.scrollableTextView()

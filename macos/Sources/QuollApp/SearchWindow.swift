@@ -9,6 +9,9 @@ protocol SearchBackend: AnyObject {
     func search(_ options: QueryOptions, interactive: Bool) -> QueryResult?
     func status() -> CatalogStatus?
     func rebuild()
+    func recordOpen(_ paths: [String])
+    func folderTotals(_ path: String) -> (bytes: UInt64, files: Int)?
+    func statistics() -> QuollService.Statistics?
 }
 
 final class InProcessBackend: SearchBackend {
@@ -31,6 +34,14 @@ final class InProcessBackend: SearchBackend {
         return status
     }
     func rebuild() { service.rebuild() }
+    func recordOpen(_ paths: [String]) { service.recordOpen(paths) }
+
+    func folderTotals(_ path: String) -> (bytes: UInt64, files: Int)? {
+        let owner = (volumes?.indexes ?? []).first { index in index.settings.roots.contains { path.hasPrefix($0) } } ?? service
+        return owner.folderTotals(path)
+    }
+
+    func statistics() -> QuollService.Statistics? { service.statistics() }
 }
 
 final class SocketBackend: SearchBackend {
@@ -49,6 +60,9 @@ final class SocketBackend: SearchBackend {
 
     func status() -> CatalogStatus? { (try? client.send(ControlRequest(command: "status")))?.status }
     func rebuild() { _ = try? client.send(ControlRequest(command: "rebuild")) }
+    func recordOpen(_ paths: [String]) { _ = try? client.send(ControlRequest(command: "opened", paths: paths)) }
+    func folderTotals(_ path: String) -> (bytes: UInt64, files: Int)? { nil }
+    func statistics() -> QuollService.Statistics? { nil }
 }
 
 /// The search window: a normal titled window (movable, resizable, full screen
@@ -85,10 +99,10 @@ final class SearchPanel: NSWindow {
 
 /// Everything-style quick filters (⌘1…⌘8), combined with the typed query.
 enum QuickFilter: Int, CaseIterable {
-    case all, folders, documents, pictures, audio, video, archives, code
+    case all, folders, documents, pictures, audio, video, archives, code, userFiles
 
     var title: String {
-        ["All", "Folders", "Documents", "Pictures", "Audio", "Video", "Archives", "Code"][rawValue]
+        ["All", "Folders", "Documents", "Pictures", "Audio", "Video", "Archives", "Code", "My Files"][rawValue]
     }
 
     var query: String {
@@ -101,6 +115,7 @@ enum QuickFilter: Int, CaseIterable {
         case .video: return "ending:mp4;mov;m4v;mkv;avi;webm;mpg;mpeg"
         case .archives: return "ending:zip;tar;gz;tgz;bz2;xz;7z;rar;dmg;iso;pkg"
         case .code: return "ending:swift;c;h;cpp;hpp;m;mm;py;js;mjs;ts;tsx;jsx;go;rs;java;kt;cs;rb;php;sh;zsh;json;yml;yaml;toml;sql;html;css"
+        case .userFiles: return "scope:user"
         }
     }
 }
@@ -122,7 +137,13 @@ final class SearchController: NSViewController, NSTableViewDataSource, NSTableVi
 
     private let field = NSSearchField()
     private let filterPopup = NSPopUpButton()
-    private var filter = QuickFilter(rawValue: UserDefaults.standard.integer(forKey: "QuollFilter")) ?? .all
+    /// Selected filter: a quick filter or a user scope, stored by title.
+    private var filterTitle = UserDefaults.standard.string(forKey: "QuollFilterTitle") ?? QuickFilter.all.title
+    private var filterQuery = ""
+    /// User-defined scope names (Settings), listed after the quick filters.
+    var customScopes: [String] = [] { didSet { if isViewLoaded { rebuildFilterPopup() } } }
+    private var folderSizes: [String: String] = [:]
+    private var pendingSizes = Set<String>()
     private let table = NSTableView()
     private let scroll = NSScrollView()
     private let statusLabel = NSTextField(labelWithString: "")
@@ -135,6 +156,7 @@ final class SearchController: NSViewController, NSTableViewDataSource, NSTableVi
     var onSettings: (() -> Void)?
     /// Adds an exclude rule (path or name) to the settings.
     var onExclude: ((String) -> Void)?
+    var onStatistics: (() -> Void)?
 
     private static let home = NSHomeDirectory()
     private let timeFormatter: DateFormatter = { let f = DateFormatter(); f.dateFormat = "HH:mm"; return f }()
@@ -171,12 +193,7 @@ final class SearchController: NSViewController, NSTableViewDataSource, NSTableVi
         rebuildSearchMenu()
 
         filterPopup.controlSize = .large
-        for item in QuickFilter.allCases {
-            filterPopup.addItem(withTitle: item.title)
-            filterPopup.lastItem?.keyEquivalent = "\(item.rawValue + 1)"
-            filterPopup.lastItem?.keyEquivalentModifierMask = .command
-        }
-        filterPopup.selectItem(at: filter.rawValue)
+        rebuildFilterPopup()
         filterPopup.target = self
         filterPopup.action = #selector(filterChanged)
         filterPopup.translatesAutoresizingMaskIntoConstraints = false
@@ -195,6 +212,9 @@ final class SearchController: NSViewController, NSTableViewDataSource, NSTableVi
         column("size", "Size", width: 80, sortKey: "size", alignRight: true)
         column("modified", "Modified", width: 130, sortKey: "modified")
         column("created", "Created", width: 130, sortKey: "created")
+        column("opened", "Opened", width: 64, sortKey: "opened", alignRight: true)
+        table.tableColumn(withIdentifier: NSUserInterfaceItemIdentifier("opened"))?.sortDescriptorPrototype =
+            NSSortDescriptor(key: "opened", ascending: false)
         // Not sortable: an extension sort collects every match (2.3M on an empty query).
         column("kind", "Kind", width: 70, sortKey: nil)
         for id in ["created", "kind"] {
@@ -359,16 +379,18 @@ final class SearchController: NSViewController, NSTableViewDataSource, NSTableVi
         case "name": sort = .name
         case "size": sort = .size
         case "created": sort = .created
+        case "opened": sort = .opened
         default: sort = .modified
         }
         highlights = Self.highlightPieces(field.stringValue)
         let typed = field.stringValue.trimmingCharacters(in: .whitespaces)
         var query = typed
-        if !filter.query.isEmpty { query = typed.isEmpty ? filter.query : "\(filter.query) (\(typed))" }
+        if !filterQuery.isEmpty { query = typed.isEmpty ? filterQuery : "\(filterQuery) (\(typed))" }
         pager.search(query, sort: sort, ascending: descriptor?.ascending ?? false)
     }
 
     private func resultsReset() {
+        if folderSizes.count > 2_000 { folderSizes = [:] }   // bounded cache
         table.reloadData()
         if pager.rowCount > 0 {
             table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
@@ -380,7 +402,7 @@ final class SearchController: NSViewController, NSTableViewDataSource, NSTableVi
     private func updateStatus() {
         var text = "\(pager.total.formatted()) results · \(String(format: "%.1f", pager.tookMS)) ms"
         if pager.isCapped { text += " · showing first \(pager.cap.formatted())" }
-        if filter != .all { text += " · \(filter.title)" }
+        if filterTitle != QuickFilter.all.title { text += " · \(filterTitle)" }
         text += indexed > 0 ? " · \(indexed.formatted()) indexed" : " · indexing…"
         statusLabel.stringValue = text
         warningLabel.stringValue = pager.warnings.filter { $0 != "cancelled" }.joined(separator: "  ")
@@ -411,11 +433,13 @@ final class SearchController: NSViewController, NSTableViewDataSource, NSTableVi
             cell.textField?.stringValue = formatter.string(from: entry.created)
         case "kind":
             cell.textField?.stringValue = entry.isDirectory ? "folder" : entry.fileExtension
+        case "opened":
+            cell.textField?.stringValue = entry.openCount.map { "\($0)×" } ?? ""
         case "folder":
             let folder = (entry.path as NSString).deletingLastPathComponent
             cell.textField?.stringValue = folder.hasPrefix(Self.home) ? "~" + folder.dropFirst(Self.home.count) : folder
         case "size":
-            cell.textField?.stringValue = entry.isDirectory ? "–" : entry.formattedSize
+            cell.textField?.stringValue = entry.isDirectory ? folderSize(entry.path, row: row) : entry.formattedSize
         default:
             let formatter = Calendar.current.isDateInToday(entry.modified) ? timeFormatter : dateFormatter
             cell.textField?.stringValue = formatter.string(from: entry.modified)
@@ -430,7 +454,7 @@ final class SearchController: NSViewController, NSTableViewDataSource, NSTableVi
         text.font = .systemFont(ofSize: 13)
         text.translatesAutoresizingMaskIntoConstraints = false
         text.lineBreakMode = id.rawValue == "folder" ? .byTruncatingHead : .byTruncatingTail
-        if id.rawValue == "size" { text.alignment = .right }
+        if id.rawValue == "size" || id.rawValue == "opened" { text.alignment = .right }
         if id.rawValue != "name" { text.textColor = .secondaryLabelColor }
         cell.addSubview(text)
         cell.textField = text
@@ -454,6 +478,28 @@ final class SearchController: NSViewController, NSTableViewDataSource, NSTableVi
             text.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
         ])
         return cell
+    }
+
+    // MARK: Folder sizes (computed from the index for visible folder rows only)
+
+    private func folderSize(_ path: String, row: Int) -> String {
+        if let known = folderSizes[path] { return known }
+        guard !pendingSizes.contains(path) else { return "…" }
+        pendingSizes.insert(path)
+        let generation = pager.generation
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self, let totals = self.backend.folderTotals(path) else { return }
+            let text = ByteCountFormatter.string(fromByteCount: Int64(clamping: totals.bytes), countStyle: .file)
+            DispatchQueue.main.async {
+                self.folderSizes[path] = text
+                self.pendingSizes.remove(path)
+                guard generation == self.pager.generation, row < self.table.numberOfRows,
+                      self.pager.entry(at: row)?.path == path,
+                      let column = self.table.tableColumns.firstIndex(where: { $0.identifier.rawValue == "size" }) else { return }
+                self.table.reloadData(forRowIndexes: IndexSet(integer: row), columnIndexes: IndexSet(integer: column))
+            }
+        }
+        return "…"
     }
 
     // MARK: Highlighting
@@ -498,9 +544,34 @@ final class SearchController: NSViewController, NSTableViewDataSource, NSTableVi
 
     // MARK: Filters, recent and saved searches
 
+    private func rebuildFilterPopup() {
+        filterPopup.removeAllItems()
+        for item in QuickFilter.allCases {
+            filterPopup.addItem(withTitle: item.title)
+            filterPopup.lastItem?.keyEquivalent = "\(item.rawValue + 1)"
+            filterPopup.lastItem?.keyEquivalentModifierMask = .command
+            filterPopup.lastItem?.representedObject = item.query
+        }
+        if !customScopes.isEmpty {
+            filterPopup.menu?.addItem(.separator())
+            for name in customScopes.sorted() {
+                filterPopup.addItem(withTitle: name)
+                filterPopup.lastItem?.representedObject = "scope:\(name)"
+            }
+        }
+        selectFilter(titled: filterTitle)
+    }
+
+    private func selectFilter(titled title: String) {
+        let item = filterPopup.item(withTitle: title) ?? filterPopup.item(at: 0)
+        filterPopup.select(item)
+        filterTitle = item?.title ?? QuickFilter.all.title
+        filterQuery = item?.representedObject as? String ?? ""
+    }
+
     @objc private func filterChanged() {
-        filter = QuickFilter(rawValue: filterPopup.indexOfSelectedItem) ?? .all
-        UserDefaults.standard.set(filter.rawValue, forKey: "QuollFilter")
+        selectFilter(titled: filterPopup.titleOfSelectedItem ?? QuickFilter.all.title)
+        UserDefaults.standard.set(filterTitle, forKey: "QuollFilterTitle")
         runSearch()
     }
 
@@ -511,7 +582,7 @@ final class SearchController: NSViewController, NSTableViewDataSource, NSTableVi
         field.recentSearches = [query] + field.recentSearches.filter { $0 != query }.prefix(19)
     }
 
-    private struct SavedSearch: Codable { var name: String; var query: String; var filter: Int }
+    private struct SavedSearch: Codable { var name: String; var query: String; var filter: String }
 
     private var savedSearches: [SavedSearch] {
         get {
@@ -565,8 +636,7 @@ final class SearchController: NSViewController, NSTableViewDataSource, NSTableVi
         guard sender.tag < savedSearches.count else { return }
         let saved = savedSearches[sender.tag]
         field.stringValue = saved.query
-        filterPopup.selectItem(at: saved.filter)
-        filter = QuickFilter(rawValue: saved.filter) ?? .all
+        selectFilter(titled: saved.filter)
         runSearch()
     }
 
@@ -580,11 +650,12 @@ final class SearchController: NSViewController, NSTableViewDataSource, NSTableVi
 
     @objc func saveCurrentSearch() {
         let query = field.stringValue.trimmingCharacters(in: .whitespaces)
-        guard let window = view.window, !query.isEmpty || filter != .all else { return }
+        let isAll = filterTitle == QuickFilter.all.title
+        guard let window = view.window, !query.isEmpty || !isAll else { return }
         let alert = NSAlert()
         alert.messageText = "Save Search"
-        alert.informativeText = filter == .all ? query : "\(filter.title): \(query)"
-        let input = NSTextField(string: query.isEmpty ? filter.title : query)
+        alert.informativeText = isAll ? query : "\(filterTitle): \(query)"
+        let input = NSTextField(string: query.isEmpty ? filterTitle : query)
         input.frame = NSRect(x: 0, y: 0, width: 320, height: 24)
         alert.accessoryView = input
         alert.addButton(withTitle: "Save")
@@ -594,7 +665,7 @@ final class SearchController: NSViewController, NSTableViewDataSource, NSTableVi
             guard let self, response == .alertFirstButtonReturn else { return }
             let name = input.stringValue.trimmingCharacters(in: .whitespaces)
             var list = self.savedSearches.filter { $0.name != name }
-            list.append(SavedSearch(name: name.isEmpty ? query : name, query: query, filter: self.filter.rawValue))
+            list.append(SavedSearch(name: name.isEmpty ? query : name, query: query, filter: self.filterTitle))
             self.savedSearches = list
             self.rebuildSearchMenu()
         }
@@ -703,6 +774,7 @@ final class SearchController: NSViewController, NSTableViewDataSource, NSTableVi
         let urls = selectedEntries.map { URL(fileURLWithPath: $0.path) }
         guard !urls.isEmpty else { return }
         urls.forEach { NSWorkspace.shared.open($0) }
+        recordOpen(urls)
         rememberQuery()
         onHide?()
     }
@@ -719,8 +791,14 @@ final class SearchController: NSViewController, NSTableViewDataSource, NSTableVi
         guard let app = sender.representedObject as? URL else { return }
         let urls = selectedEntries.map { URL(fileURLWithPath: $0.path) }
         NSWorkspace.shared.open(urls, withApplicationAt: app, configuration: NSWorkspace.OpenConfiguration())
+        recordOpen(urls)
         rememberQuery()
         onHide?()
+    }
+
+    private func recordOpen(_ urls: [URL]) {
+        let paths = urls.map(\.path)
+        DispatchQueue.global(qos: .utility).async { [weak self] in self?.backend.recordOpen(paths) }
     }
 
     @objc private func openInTerminal() {
@@ -847,9 +925,10 @@ final class SearchController: NSViewController, NSTableViewDataSource, NSTableVi
         case (.command, "r", _): reindex()
         case (.command, "y", _): toggleQuickLook()
         case (.command, "s", _): saveCurrentSearch()
-        case (.command, let digit, _) where digit.count == 1 && ("1"..."8").contains(digit):
+        case (.command, let digit, _) where digit.count == 1 && ("1"..."9").contains(digit):
             filterPopup.selectItem(at: Int(digit)! - 1)
             filterChanged()
+        case (.command, "i", _): onStatistics?()
         case (.command, "w", _): onHide?()
         case (.command, ",", _): onSettings?()
         default: return false

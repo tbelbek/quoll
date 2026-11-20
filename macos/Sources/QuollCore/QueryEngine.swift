@@ -11,13 +11,27 @@ import Foundation
 public final class QueryEngine {
     private let generationLock = NSLock()
     private var generation = 0
+    private var scopes = Preferences.builtInScopes
 
     public init() {}
 
+    public func setScopes(_ new: [String: String]) {
+        generationLock.lock()
+        scopes = new
+        generationLock.unlock()
+    }
+
     /// `cancellable`: a newer cancellable search abandons this one (interactive typing).
-    public func search(_ options: QueryOptions, in store: IndexStore, cancellable: Bool = false) -> QueryResult {
+    /// `openCounts`: path → times opened from Quoll (sort key `opened`).
+    public func search(_ options: QueryOptions, in store: IndexStore, cancellable: Bool = false,
+                       openCounts: [String: Int] = [:]) -> QueryResult {
         let started = Date()
-        let parsed = SearchParser.parse(options.query)
+        generationLock.lock()
+        let scopes = self.scopes
+        generationLock.unlock()
+        let (expanded, scopeWarnings) = SearchParser.expandScopes(options.query, scopes)
+        var parsed = SearchParser.parse(expanded)
+        parsed.warnings += scopeWarnings
         var token = -1
         if cancellable {
             generationLock.lock()
@@ -33,7 +47,7 @@ public final class QueryEngine {
         }
 
         var result = store.read { () -> QueryResult in
-            let plan = Plan(query: parsed, options: options, store: store)
+            let plan = Plan(query: parsed, options: options, store: store, openCounts: openCounts)
             let (total, ids, cancelled) = plan.run(isStale: isStale)
             let page = ids.map { plan.entry($0) }
             var result = QueryResult(query: options.query, count: page.count, total: total, tookMS: 0,
@@ -75,9 +89,17 @@ private final class Plan {
     private let driver: UnsafeMutableBufferPointer<UInt8>?
     private let driverDecides: Bool
 
-    init(query: SearchQuery, options: QueryOptions, store: IndexStore) {
+    /// (id, count) sorted by id; looked up by binary search without ARC.
+    private let opened: UnsafeMutableBufferPointer<(id: Int, count: Int)>
+
+    init(query: SearchQuery, options: QueryOptions, store: IndexStore, openCounts: [String: Int] = [:]) {
         self.store = store
         self.options = options
+        let resolved = openCounts.compactMap { path, count in store.resolve(path, exact: true).map { (id: $0, count: count) } }
+            .sorted { $0.id < $1.id }
+        opened = .allocate(capacity: max(1, resolved.count))
+        _ = opened.initialize(from: resolved)
+        openedCount = resolved.count
         rootFolded = (0..<store.rootCount).map { Fold.fold(store.meta.roots[$0]) }
         var nodes: [FlatNode] = []
         var children: [Int32] = []
@@ -146,7 +168,19 @@ private final class Plan {
         driverDecides = decides && driver != nil
     }
 
+    private let openedCount: Int
+
+    @inline(__always) func openCount(_ id: Int) -> Int {
+        var lo = 0, hi = openedCount
+        while lo < hi {
+            let mid = (lo + hi) >> 1
+            if opened[mid].id < id { lo = mid + 1 } else { hi = mid }
+        }
+        return lo < openedCount && opened[lo].id == id ? opened[lo].count : 0
+    }
+
     deinit {
+        opened.deallocate()
         for t in terms { t.release() }
         nodePtr.deallocate()
         childPtr.deallocate()
@@ -204,6 +238,9 @@ private final class Plan {
                         case .modified: c = Self.cmp(store.mtime(id), store.mtime(worst))
                         case .size: c = Self.cmp(store.size(id), store.size(worst))
                         case .created: c = Self.cmp(store.meta(id).ctime, store.meta(worst).ctime)
+                        case .opened:
+                            let a = openCount(id), b = openCount(worst)
+                            c = a != b ? Self.cmp(a, b) : Self.cmp(store.mtime(id), store.mtime(worst))
                         default: c = IndexStore.compare(store.folded(id), store.folded(worst))
                         }
                         if ascending ? c > 0 : c < 0 { continue }
@@ -331,11 +368,14 @@ private final class Plan {
             : Date(timeIntervalSince1970: TimeInterval(meta.mtime))
         let components = path.split(separator: "/", omittingEmptySubsequences: true)
         let mount = components.count > 1 && components[0] == "Volumes" ? "/Volumes/\(components[1])" : "/"
-        return FileEntry(path: path, name: name, isDirectory: store.isDirectory(id), size: Int64(meta.size),
-                         modified: Date(timeIntervalSince1970: TimeInterval(meta.mtime)),
-                         created: Date(timeIntervalSince1970: TimeInterval(meta.ctime)),
-                         accessed: accessed, fileExtension: (name as NSString).pathExtension.lowercased(),
-                         level: store.depth(id), mount: mount)
+        var entry = FileEntry(path: path, name: name, isDirectory: store.isDirectory(id), size: Int64(meta.size),
+                              modified: Date(timeIntervalSince1970: TimeInterval(meta.mtime)),
+                              created: Date(timeIntervalSince1970: TimeInterval(meta.ctime)),
+                              accessed: accessed, fileExtension: (name as NSString).pathExtension.lowercased(),
+                              level: store.depth(id), mount: mount)
+        let count = openCount(id)
+        if count > 0 { entry.openCount = count }
+        return entry
     }
 
     func accessTime(_ id: Int) -> Date {
@@ -731,12 +771,15 @@ private final class Membership {
     private var targets = Set<Int>()
     private var member: [Bool] = []   // by id, folders only meaningful
     private let includeTargets: Bool
+    /// Absolute folder: no table, candidates walk up to it (D19).
+    private var single = -1
 
     init(target: String, store: IndexStore, includeTargets: Bool) {
         self.includeTargets = includeTargets
         if target.hasPrefix("/") || target.hasPrefix("~") {
             let path = Scanner.standardize(target)
-            if let id = store.resolve(path), store.isDirectory(id) { targets.insert(id) }
+            if let id = store.resolve(path), store.isDirectory(id) { targets.insert(id); single = id }
+            return   // one target: answered by walking up from each candidate
         } else {
             let key = Fold.fold(target)
             for id in 0..<store.count where store.isDirectory(id) && !store.isDead(id)
@@ -771,6 +814,15 @@ private final class Membership {
 
     /// Entry is a target folder or anywhere below one.
     func contains(_ id: Int, store: IndexStore) -> Bool {
+        if member.isEmpty {
+            guard single >= 0 else { return false }
+            var cursor = id
+            while cursor >= 0 {
+                if cursor == single { return true }
+                cursor = store.parent(cursor)
+            }
+            return false
+        }
         if store.isDirectory(id) { return id < member.count && member[id] }
         let p = store.parent(id)
         return p >= 0 && p < member.count && member[p]
@@ -816,6 +868,13 @@ private struct Order {
             collectsAll = false
         case .created:
             before = { numeric(store.meta($0).ctime, store.meta($1).ctime, $0, $1) }
+            collectsAll = false
+        case .opened:
+            before = { a, b in
+                let x = plan.openCount(a), y = plan.openCount(b)
+                if x != y { return ascending ? x < y : x > y }
+                return numeric(store.mtime(a), store.mtime(b), a, b)
+            }
             collectsAll = false
         case .level, .path, .fileExtension, .accessed:
             before = { _, _ in false }

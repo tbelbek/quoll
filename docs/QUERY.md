@@ -93,6 +93,15 @@ the access time.
 Modifiers can be standalone (`matchcase: report`) or carry the term
 (`matchcase:Report`).
 
+## Scopes
+
+`scope:name` expands to a saved query. Built in: `scope:user` = your own files
+(`under:~ !under:~/Library !path:/. !path:.photoslibrary/`: no Library, no
+dot-folders, no Photos library internals). Define more in Settings or
+`settings.json` (`"scopes": {"work": "under:~/Repos ending:md"}`); they also appear
+in the filter menu. Sort `--sort opened` puts the files you open most from Quoll
+first.
+
 ## Warnings
 
 Unknown filters are not silently ignored. The parser returns a warning such as

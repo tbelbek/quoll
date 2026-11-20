@@ -334,6 +334,14 @@ public final class IndexStore {
 
     public func setEventId(_ id: UInt64) { meta.eventId = id }
 
+    /// Rules changed in place (incremental update): the next snapshot records them.
+    public func setRulesFingerprint(_ fingerprint: String) { meta.rulesFingerprint = fingerprint }
+
+    /// Calls `body` with every live entry id (caller holds a lock).
+    public func forEachLive(_ body: (Int) -> Void) {
+        for id in rootCount..<count where !dead.test(id) { body(id) }
+    }
+
     // MARK: Reading (caller holds a lock)
 
     public var count: Int { bCount + dFlags.count }
@@ -568,6 +576,36 @@ public final class IndexStore {
     /// Root whose subtree holds `path`.
     public func root(of path: String) -> String? {
         meta.roots.first { path == $0 || path.hasPrefix($0 == "/" ? "/" : $0 + "/") }
+    }
+
+    // MARK: Totals (caller holds a lock)
+
+    /// Bytes and file count below folder `d` (walks the live subtree).
+    public func subtreeTotals(_ d: Int) -> (bytes: UInt64, files: Int) {
+        var bytes: UInt64 = 0, files = 0
+        var stack = [d], kids: [Int] = []
+        while let id = stack.popLast() {
+            kids.removeAll(keepingCapacity: true)
+            appendChildren(of: id, to: &kids)
+            for k in kids {
+                if isDirectory(k) { stack.append(k) } else { bytes &+= size(k); files += 1 }
+            }
+        }
+        return (bytes, files)
+    }
+
+    /// Totals per file extension over all live files: ext → (count, bytes).
+    public func extensionTotals() -> [String: (count: Int, bytes: UInt64)] {
+        var totals: [String: (count: Int, bytes: UInt64)] = [:]
+        for id in rootCount..<count where !dead.test(id) && !isDirectory(id) {
+            let name = folded(id)
+            let ext = name.lastIndex(of: UInt8(ascii: ".")).map { dot -> String in
+                dot > 0 && dot + 1 < name.count ? String(decoding: UnsafeBufferPointer(rebasing: name[(dot + 1)...]), as: UTF8.self) : ""
+            } ?? ""
+            let current = totals[ext] ?? (0, 0)
+            totals[ext] = (current.count + 1, current.bytes &+ size(id))
+        }
+        return totals
     }
 
     // MARK: Writing (caller holds the write lock)

@@ -62,9 +62,15 @@ Created or Kind. The menu next to the field filters by type (All, Folders,
 Documents, Pictures, Audio, Video, Archives, Code; ⌘1–⌘8). The magnifier menu
 keeps recent searches and saved ones (⌘S saves). Right-click a result for Open
 With, Open in Terminal, Rename, Move to Trash, or to exclude its folder from the
-index. Settings (⌘,) holds the hotkey, open at login, external drives, the folders
-to index, excludes and includes. `quoll show` (or opening the app again) brings the
-window up, handy over a remote session.
+index. The Opened column counts what you opened from Quoll; sort by it to get
+your most used files first. Folders show their total size. ⌘I opens index
+statistics (largest folders, file types). Settings (⌘,) holds the hotkey (with a
+recorder), open at login, external drives, the folders to index, excludes,
+includes and your own scopes.
+
+**Elsewhere.** Finder › Services › *Search in Quoll* searches inside the selected
+folder; `quoll://search?q=...` opens the window with a query; `quoll show "query"`
+(or opening the app again) does the same from a terminal or a remote session.
 
 **Build from source** (Command Line Tools are enough):
 

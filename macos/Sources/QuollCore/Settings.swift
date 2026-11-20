@@ -43,6 +43,11 @@ public struct Preferences: Codable, Sendable {
     public var openAtLogin: Bool?
     /// Index external drives (local, writable, non-internal volumes) while mounted.
     public var indexExternalVolumes: Bool
+    /// Named query scopes: `scope:name` in a query expands to the query.
+    public var scopes: [String: String]
+
+    /// Shipped scopes; user scopes with the same name win.
+    public static let builtInScopes = ["user": "under:~ !under:~/Library !path:/. !path:.photoslibrary/"]
 
     public init(
         roots: [String],
@@ -71,11 +76,12 @@ public struct Preferences: Codable, Sendable {
         self.useDefaultExcludes = useDefaultExcludes
         self.hotkey = hotkey
         self.indexExternalVolumes = false
+        self.scopes = [:]
     }
 
     private enum CodingKeys: String, CodingKey {
         case roots, excludes, includes, dataDirectory, controlPath, http, defaultLimit
-        case skipHidden, skipPackages, followSymlinks, useDefaultExcludes, hotkey, openAtLogin, indexExternalVolumes
+        case skipHidden, skipPackages, followSymlinks, useDefaultExcludes, hotkey, openAtLogin, indexExternalVolumes, scopes
     }
 
     // Tolerant decoding: settings files written by older versions lack newer keys.
@@ -96,10 +102,16 @@ public struct Preferences: Codable, Sendable {
         hotkey = try c.decodeIfPresent(String.self, forKey: .hotkey) ?? "hyper+s"
         openAtLogin = try c.decodeIfPresent(Bool.self, forKey: .openAtLogin)
         indexExternalVolumes = try c.decodeIfPresent(Bool.self, forKey: .indexExternalVolumes) ?? false
+        scopes = try c.decodeIfPresent([String: String].self, forKey: .scopes) ?? [:]
     }
 
     /// Effective exclude rules: user rules, shipped defaults, and Quoll's own data
     /// directory (indexing it would make every catalog save re-trigger the watcher).
+    /// Exclude rules in effect (shipped defaults plus the user's), as written.
+    public var effectiveExcludes: [String] {
+        (useDefaultExcludes ? ExcludeRules.defaults : []) + excludes
+    }
+
     public var excludeRules: ExcludeRules {
         ExcludeRules(
             (useDefaultExcludes ? ExcludeRules.defaults : []) + excludes,

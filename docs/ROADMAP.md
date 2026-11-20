@@ -196,7 +196,9 @@ Open:
       Rename / Trash, exclude a folder from a result (0.4.0).
 - [x] External drives: an index per mounted drive, replayed on reattach (0.4.0).
 - [x] Homebrew tap: `brew install --cask tbelbek/quoll/quoll` (0.4.0).
-- [ ] Hotkey recorder in Settings.
+- [x] Hotkey recorder; scopes (`scope:user`, user-defined); Opened count + sort;
+      folder sizes; index statistics; Finder service and `quoll://` URLs;
+      incremental rule changes (0.5.0).
 - [ ] Developer ID signing + notarization (needs an Apple Developer account).
 
 ## Cut / defer

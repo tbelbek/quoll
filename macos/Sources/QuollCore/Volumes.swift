@@ -112,7 +112,7 @@ public final class VolumeIndexes {
 public enum MultiSearch {
     public static func search(_ options: QueryOptions, in services: [QuollService], interactive: Bool) -> QueryResult {
         guard services.count > 1 else {
-            return services.first.map { $0.engine.search(options, in: $0.store, cancellable: interactive) }
+            return services.first.map { $0.search(options, interactive: interactive) }
                 ?? QueryResult(query: options.query, count: 0, total: 0, tookMS: 0, truncated: false, results: [])
         }
         var wide = options
@@ -120,7 +120,7 @@ public enum MultiSearch {
         wide.limit = options.limit <= 0 ? 0 : options.offset + options.limit
         let parts = services.enumerated().map { index, service in
             // Only the main index takes part in interactive cancellation.
-            service.engine.search(wide, in: service.store, cancellable: interactive && index == 0)
+            service.search(wide, interactive: interactive && index == 0)
         }
         if parts.contains(where: { $0.warnings.contains("cancelled") }) {
             var cancelled = parts[0]
@@ -154,6 +154,7 @@ public enum MultiSearch {
             let pa = Fold.fold(a.path), pb = Fold.fold(b.path)
             decided = pa == pb ? nil : (asc ? pa.lexicographicallyPrecedes(pb) : pb.lexicographicallyPrecedes(pa))
         case .name: decided = nil
+        case .opened: decided = ordered(a.openCount ?? 0, b.openCount ?? 0) ?? ordered(a.modified, b.modified)
         }
         if let decided { return decided }
         let fa = Fold.fold(a.name), fb = Fold.fold(b.name)

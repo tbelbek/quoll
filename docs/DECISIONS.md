@@ -220,3 +220,29 @@ evaluates one term per extension per entry; `ending:pdf;doc;…` is one term who
 extensions sit NUL-separated in a single raw buffer (no reference-counted field in
 the hot path, D7). Documents filter on an empty query: ~50 ms at 1.1M entries; any
 typed word becomes the memmem driver and brings it back to a few ms.
+
+## D18 — Rule changes without a full scan
+
+Excluding a folder from a result rescanned the whole home (7–12 s). Now a rules
+change is diffed: added excludes remove only the entries they match (a path rule
+resolves one folder; a name rule checks every live name once) — includes still
+win; a removed exclude path or an added include path walks just that folder.
+Removed name/glob excludes, removed includes and path globs still rescan (their
+effect cannot be located without a walk). The new rules fingerprint is written
+with an immediate compaction (~0.5 s), so a restart does not rescan.
+`quoll-selftest --m4` checks each case against a fresh scan.
+
+## D19 — `under:` with an absolute folder walks up instead of building a table
+
+`under:` built a membership table over every folder per query (one pass over
+1.4M entries); `scope:user` has two such terms, so `scope:user ending:md` took
+290 ms. For one absolute folder, each candidate now walks its parents (~10 steps)
+and only driver hits are candidates: 18 ms. Folder-name targets (`under:src`) keep
+the table, since all folders with that name must be found anyway.
+
+## D20 — Open counts live with the index, not the UI
+
+`opened.json` in the data directory (path → count, top 500), written by the
+service, so the app and `quoll find --sort opened` agree. The engine resolves the
+paths to ids once per query into a sorted raw buffer; the comparator binary-
+searches it (no dictionary access in the hot path, D7).

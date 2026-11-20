@@ -41,6 +41,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             let controller = SearchController(backend: backend)
             controller.onHide = { [weak self] in self?.hidePanel() }
             controller.onSettings = { [weak self] in self?.openSettings() }
+            controller.onStatistics = { [weak self] in self?.openStatistics() }
+            controller.customScopes = Array(settings.scopes.keys)
             controller.onExclude = { [weak self] rule in
                 guard let self, !self.settings.excludes.contains(rule) else { return }
                 var updated = self.settings
@@ -62,6 +64,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
         registerHotKey()
         applyLoginItem()
+        NSApp.servicesProvider = self   // Finder: Services › Search in Quoll
+        NSUpdateDynamicServices()
         // QUOLL_SHOW=<query>: open the panel at launch (screenshots, manual testing).
         if let query = ProcessInfo.processInfo.environment["QUOLL_SHOW"] {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
@@ -88,7 +92,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             countItem.title = "service error: \(error.localizedDescription)"
             return nil
         }
-        service.onShow = { [weak self] in self?.showPanel() }
+        service.onShow = { [weak self] query in self?.showPanel(query: query) }
         self.service = service
         let backend = InProcessBackend(service: service)
         configureVolumes(for: backend)
@@ -122,11 +126,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         return false
     }
 
-    private func showPanel() {
+    private func showPanel(query: String? = nil) {
         guard let panel else { return }
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
         controller?.willShow()
+        if let query { controller?.setQuery(query) }
+    }
+
+    /// Finder service: search inside the selected folder (or the selected file's folder).
+    @objc func searchInQuoll(_ pasteboard: NSPasteboard, userData: String?, error: AutoreleasingUnsafeMutablePointer<NSString?>) {
+        let urls = pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
+        guard let url = urls.first else { return }
+        var isFolder: ObjCBool = false
+        FileManager.default.fileExists(atPath: url.path, isDirectory: &isFolder)
+        let folder = isFolder.boolValue ? url.path : url.deletingLastPathComponent().path
+        showPanel(query: "under:\"\(folder)\" ")
+    }
+
+    /// quoll://search?q=<query> (from scripts, Shortcuts, other apps).
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls where url.scheme == "quoll" {
+            let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "q" }?.value
+            showPanel(query: query ?? "")
+        }
+    }
+
+    private var statsWindow: StatisticsWindow?
+
+    @objc private func openStatistics() {
+        guard let backend else { return }
+        let window = statsWindow ?? StatisticsWindow()
+        statsWindow = window
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+        window.load(from: backend)
     }
 
     private func registerHotKey() {
@@ -184,6 +218,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         countItem.isEnabled = false
         menu.addItem(countItem)
         menu.addItem(withTitle: "Reindex", action: #selector(reindex), keyEquivalent: "").target = self
+        menu.addItem(withTitle: "Index Statistics…", action: #selector(openStatistics), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Settings…", action: #selector(openSettings), keyEquivalent: ",").target = self
         menu.addItem(.separator())
         menu.addItem(withTitle: "Quit Quoll", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
@@ -211,6 +246,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     @objc private func openSettings() {
         let window = settingsWindow ?? SettingsWindow(settings: settings) { [weak self] updated in self?.apply(updated) }
+        window.pauseHotKey = { [weak self] in self?.hotKey = nil }
+        window.resumeHotKey = { [weak self] in self?.registerHotKey() }
         settingsWindow = window
         window.load(settings)
         NSApp.activate(ignoringOtherApps: true)
@@ -220,6 +257,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// Saves and applies settings: hotkey immediately, roots/rules by a rescan.
     private func apply(_ updated: Preferences) {
         settings = updated
+        controller?.customScopes = Array(updated.scopes.keys)
         if let inProcess = backend as? InProcessBackend { configureVolumes(for: inProcess) }
         if let service {
             DispatchQueue.global(qos: .utility).async { [weak self] in

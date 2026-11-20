@@ -59,8 +59,10 @@ public final class QuollService {
     private var appliedEventId: UInt64 = 0
     public private(set) var lastScan: Date?
     public private(set) var replayDone = false
+    private var openCounts: [String: Int] = [:]
+    private let countsLock = NSLock()
     /// Set by the app: shows the search window (`quoll show`, for remote use).
-    public var onShow: (() -> Void)?
+    public var onShow: ((String?) -> Void)?
     /// Full scans since start (tests: replay must not need one).
     public private(set) var fullScans = 0
     /// Set during a batch when a root itself changed.
@@ -92,6 +94,8 @@ public final class QuollService {
         try? FileManager.default.removeItem(at: settings.catalogURL)
 
         let loaded = loadSnapshot()
+        applyScopes()
+        loadOpenCounts()
 
         if serveControl {
             let server = ControlServer(controlPath: settings.controlPath) { [weak self] request in
@@ -167,6 +171,86 @@ public final class QuollService {
         } catch {
             log("unable to start FSEvents monitor: \(error.localizedDescription)")
         }
+    }
+
+    // MARK: - Statistics
+
+    public struct Statistics {
+        public var files = 0, folders = 0
+        public var snapshotBytes: Int64 = 0
+        /// Largest folders one and two levels below each root: (path, bytes, files).
+        public var largest: [(path: String, bytes: UInt64, files: Int)] = []
+        /// Extensions by total size: (ext, count, bytes).
+        public var types: [(ext: String, count: Int, bytes: UInt64)] = []
+    }
+
+    /// Size of a folder's live subtree (nil if not indexed here).
+    public func folderTotals(_ path: String) -> (bytes: UInt64, files: Int)? {
+        store.read {
+            guard let id = store.resolve(path, exact: true), store.isDirectory(id) else { return nil }
+            return store.subtreeTotals(id)
+        }
+    }
+
+    /// Computed on demand (one walk over the index); nothing is kept afterwards.
+    public func statistics(top: Int = 15) -> Statistics {
+        var stats = Statistics()
+        store.read {
+            stats.files = store.liveFiles
+            stats.folders = store.liveFolders
+            stats.snapshotBytes = SnapshotLocation.bytes(of: store.snapshotDirectory)
+            var folders: [(path: String, bytes: UInt64, files: Int)] = []
+            for root in 0..<store.rootCount where !store.isDead(root) {
+                for child in store.children(of: root) where store.isDirectory(child) {
+                    let t = store.subtreeTotals(child)
+                    folders.append((store.path(child), t.bytes, t.files))
+                    for grandchild in store.children(of: child) where store.isDirectory(grandchild) {
+                        let g = store.subtreeTotals(grandchild)
+                        if g.bytes > 0 { folders.append((store.path(grandchild), g.bytes, g.files)) }
+                    }
+                }
+            }
+            stats.largest = Array(folders.sorted { $0.bytes > $1.bytes }.prefix(top))
+            stats.types = store.extensionTotals().map { (ext: $0.key.isEmpty ? "(none)" : $0.key, count: $0.value.count, bytes: $0.value.bytes) }
+                .sorted { $0.bytes > $1.bytes }.prefix(top).map { $0 }
+        }
+        return stats
+    }
+
+    // MARK: - Search, scopes, open counts
+
+    /// Searches this index with the user's scopes and open counts.
+    public func search(_ options: QueryOptions, interactive: Bool = false) -> QueryResult {
+        countsLock.lock()
+        let counts = openCounts
+        countsLock.unlock()
+        return engine.search(options, in: store, cancellable: interactive, openCounts: counts)
+    }
+
+    func applyScopes() {
+        engine.setScopes(Preferences.builtInScopes.merging(settings.scopes.reduce(into: [:]) { $0[$1.key.lowercased()] = $1.value }) { _, user in user })
+    }
+
+    private var openCountsURL: URL {
+        URL(fileURLWithPath: (settings.dataDirectory as NSString).appendingPathComponent("opened.json"))
+    }
+
+    private func loadOpenCounts() {
+        guard let data = try? Data(contentsOf: openCountsURL),
+              let counts = try? JSONDecoder().decode([String: Int].self, from: data) else { return }
+        countsLock.lock(); openCounts = counts; countsLock.unlock()
+    }
+
+    /// Counts an open from Quoll (Enter, Open With, reveal); kept for the 500 most used.
+    public func recordOpen(_ paths: [String]) {
+        countsLock.lock()
+        for path in paths { openCounts[path, default: 0] += 1 }
+        if openCounts.count > 500 {
+            openCounts = Dictionary(uniqueKeysWithValues: openCounts.sorted { $0.value > $1.value }.prefix(500).map { ($0.key, $0.value) })
+        }
+        let data = try? JSONEncoder().encode(openCounts)
+        countsLock.unlock()
+        try? data?.write(to: openCountsURL, options: .atomic)
     }
 
     // MARK: - Snapshot
@@ -311,14 +395,72 @@ public final class QuollService {
     /// length of a rescan; call off the main thread.
     public func update(settings new: Preferences) {
         stateQueue.sync {
+            let old = settings
             let before = fingerprint
+            let oldRoots = roots
             settings = new
             try? settings.save()
+            applyScopes()
             guard fingerprint != before else { return }
+            if roots == oldRoots, updateRulesIncrementally(from: old) {
+                store.write { store.setRulesFingerprint(fingerprint) }
+                compactLocked(reason: "rules changed")   // persist the new rules with the tree
+                return
+            }
             let id = ChangeWatcher.currentEventId
             rebuildLocked(eventId: id)
             startWatcher(since: id)
         }
+    }
+
+    /// D18: apply a rule change without a full scan when possible. Added excludes
+    /// remove only the entries they match; a removed exclude path or an added
+    /// include path walks just that folder. Removed name/glob excludes, removed
+    /// includes and path globs need a full scan (returns false). Runs on stateQueue.
+    private func updateRulesIncrementally(from old: Preferences) -> Bool {
+        func isPlainPath(_ rule: String) -> Bool {
+            (rule.hasPrefix("~") || rule.contains("/")) && !rule.contains("*") && !rule.contains("?") && !rule.contains("[")
+        }
+        func isGlob(_ rule: String) -> Bool { rule.contains("*") || rule.contains("?") || rule.contains("[") }
+        let oldEx = Set(old.effectiveExcludes), newEx = Set(settings.effectiveExcludes)
+        let added = newEx.subtracting(oldEx), removed = oldEx.subtracting(newEx)
+        let includesAdded = Set(settings.includes).subtracting(old.includes)
+        let includesRemoved = Set(old.includes).subtracting(settings.includes)
+        guard includesRemoved.isEmpty,
+              removed.allSatisfy(isPlainPath), includesAdded.allSatisfy(isPlainPath),
+              !added.contains(where: { $0.contains("/") && isGlob($0) }) else { return false }
+        let base = settings.excludeRules
+        store.write {
+            // 1. New excludes: drop matching subtrees (includes still win).
+            var candidates: [Int] = []
+            let names = added.filter { !$0.contains("/") && !$0.hasPrefix("~") }
+            for rule in added where isPlainPath(rule) {
+                if let id = store.resolve(Scanner.standardize(rule), exact: true), id >= store.rootCount { candidates.append(id) }
+            }
+            if !names.isEmpty {
+                let exact = Set(names.filter { !isGlob($0) }), globs = names.filter(isGlob)
+                store.forEachLive { id in
+                    let name = String(decoding: store.raw(id), as: UTF8.self)
+                    if exact.contains(name) || globs.contains(where: { fnmatch($0, name, 0) == 0 }) { candidates.append(id) }
+                }
+            }
+            for id in candidates where !store.isDead(id) {
+                let path = store.path(id)
+                guard let root = store.root(of: path) else { continue }
+                if base.relative(to: root).excludesAnyComponent(of: path, below: root) { store.removeSubtree(id) }
+            }
+            // 2. Areas that became visible: walk just those folders.
+            for rule in removed.union(includesAdded) {
+                let path = Scanner.standardize(rule)
+                guard let root = store.root(of: path) else { continue }
+                let rules = base.relative(to: root)
+                var st = stat()
+                guard lstat(path, &st) == 0, !rules.excludesAnyComponent(of: path, below: root) else { continue }
+                if let id = store.resolve(path, exact: true), id >= store.rootCount { store.removeSubtree(id) }
+                upsert(path, st, root: root, rules: rules, rescan: false)
+            }
+        }
+        return true
     }
 
     /// Blocks until all queued change batches have been applied (tests, CLI).
@@ -541,8 +683,13 @@ public final class QuollService {
         switch request.command {
         case "show":
             guard let onShow else { return .failure("unavailable", "no window in this process", id: request.id) }
-            DispatchQueue.main.async(execute: onShow)
+            let query = request.query
+            DispatchQueue.main.async { onShow(query) }
             return ControlReply(id: request.id, message: "shown")
+
+        case "opened":
+            recordOpen(request.paths ?? [request.path].compactMap { $0 })
+            return ControlReply(id: request.id, message: "recorded")
 
         case "ping":
             return ControlReply(id: request.id, message: "pong")
@@ -555,7 +702,7 @@ public final class QuollService {
                 sort: request.sort ?? .name,
                 ascending: request.ascending ?? true
             )
-            let response = engine.search(options, in: store)
+            let response = search(options)
             return ControlReply(
                 id: request.id,
                 count: response.count,
@@ -614,7 +761,7 @@ public final class QuollService {
                 sort: request.sort ?? .path,
                 ascending: true
             )
-            let response = engine.search(options, in: store)
+            let response = search(options)
             let data = ReportWriter.export(response.results, format: format)
             return ControlReply(
                 id: request.id,
@@ -669,7 +816,7 @@ public final class QuollService {
                 sort: sort,
                 ascending: ascending
             )
-            let response = engine.search(options, in: store)
+            let response = search(options)
 
             if request.query["json"] == "1" || (request.headers["accept"] ?? "").contains("application/json") {
                 return .json(response)
@@ -687,7 +834,7 @@ public final class QuollService {
                 sort: .path,
                 ascending: true
             )
-            let response = engine.search(options, in: store)
+            let response = search(options)
             let data = ReportWriter.export(response.results, format: format)
             let contentType: String
             switch format {

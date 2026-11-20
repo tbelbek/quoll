@@ -51,6 +51,30 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <true/>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSServices</key>
+    <array>
+        <dict>
+            <key>NSMenuItem</key>
+            <dict><key>default</key><string>Search in Quoll</string></dict>
+            <key>NSMessage</key>
+            <string>searchInQuoll</string>
+            <key>NSPortName</key>
+            <string>Quoll</string>
+            <key>NSRequiredContext</key>
+            <dict/>
+            <key>NSSendFileTypes</key>
+            <array><string>public.folder</string><string>public.item</string></array>
+        </dict>
+    </array>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>com.quoll.search</string>
+            <key>CFBundleURLSchemes</key>
+            <array><string>quoll</string></array>
+        </dict>
+    </array>
     <key>NSHumanReadableCopyright</key>
     <string>MIT License</string>
 </dict>

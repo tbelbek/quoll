@@ -236,6 +236,29 @@ do {
     expect(false, "exclude fixture: \(error)")
 }
 
+// Scopes, opened sort, folder totals
+do {
+    let root = try makeTree(["docs/a.md": 10, "docs/b.md": 20, ".hidden/c.md": 5, "Library/d.md": 1, "x.txt": 1])
+    defer { try? FileManager.default.removeItem(atPath: root) }
+    let store = try scanStore(root)
+    let scoped = engine.search(QueryOptions(query: "scope:notes", limit: 10), in: store)
+    expect(scoped.total == 0 && scoped.warnings.contains { $0.contains("unknown scope") }, "scope: unknown is reported")
+    engine.setScopes(["notes": "under:docs ending:md"])
+    expect(Set(names("scope:notes", store)) == ["a.md", "b.md"], "scope: expands to its query")
+    expect(Set(names("scope:notes b", store)) == ["b.md"], "scope: combines with words")
+    engine.setScopes(Preferences.builtInScopes)
+    let expanded = SearchParser.expandScopes("scope:user x", Preferences.builtInScopes).query
+    expect(expanded.hasPrefix("(under:~"), "scope:user is built in")
+    let counts = [root + "/docs/b.md": 3, root + "/x.txt": 1]
+    let opened = engine.search(QueryOptions(query: "", limit: 3, sort: .opened, ascending: false), in: store, openCounts: counts)
+    expect(opened.results.first?.name == "b.md" && opened.results.first?.openCount == 3, "opened: most opened first")
+    expect(opened.results.dropFirst().first?.name == "x.txt", "opened: then the next most opened")
+    let totals = store.read { store.subtreeTotals(store.resolve(root + "/docs")!) }
+    expect(totals.bytes == 30 && totals.files == 2, "folder totals")
+} catch {
+    expect(false, "scope fixture: \(error)")
+}
+
 // Overlay: subtree delete and rename cost, compaction keeps the live view
 do {
     let root = try makeTree(["big/.keep": 1, "other/file.txt": 1])

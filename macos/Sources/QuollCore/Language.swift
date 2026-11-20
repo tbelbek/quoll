@@ -111,6 +111,37 @@ public struct SearchQuery: Sendable {
 // MARK: - Parser
 
 public enum SearchParser {
+    /// Replaces `scope:name` tokens (outside quotes) with `(query)`. Unknown names
+    /// are reported and match nothing.
+    public static func expandScopes(_ input: String, _ scopes: [String: String]) -> (query: String, warnings: [String]) {
+        guard input.contains("scope:") else { return (input, []) }
+        var out = ""
+        var warnings: [String] = []
+        var inQuotes = false
+        var index = input.startIndex
+        while index < input.endIndex {
+            let c = input[index]
+            if c == "\"" { inQuotes.toggle() }
+            let atBoundary = index == input.startIndex || " (!-|".contains(input[input.index(before: index)])
+            if !inQuotes, atBoundary, input[index...].hasPrefix("scope:") {
+                var end = input.index(index, offsetBy: 6)
+                while end < input.endIndex, !" ()|".contains(input[end]) { end = input.index(after: end) }
+                let name = String(input[input.index(index, offsetBy: 6)..<end]).lowercased()
+                if let query = scopes[name] {
+                    out += "(\(query))"
+                } else {
+                    warnings.append("unknown scope '\(name)'")
+                    out += "(exact:\u{1}none)"
+                }
+                index = end
+                continue
+            }
+            out.append(c)
+            index = input.index(after: index)
+        }
+        return (out, warnings)
+    }
+
     enum Token: Equatable {
         case word(String)
         case or

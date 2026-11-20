@@ -34,6 +34,8 @@ and carries one JSON object per line in each direction.
 | `open` | `path` | open with the default application |
 | `reveal` | `path` | reveal in Finder |
 | `export` | `query`, `format` | return JSON, CSV or TSV text |
+| `show` | `query` (optional) | bring up the app's window, optionally with a query |
+| `opened` | `paths` | count an open (feeds the `opened` sort) |
 | `stop` | — | stop the service |
 
 `scan` and `rebuild` reply immediately (`scan started`) and run in the
