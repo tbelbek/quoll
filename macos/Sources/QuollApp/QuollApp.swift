@@ -144,6 +144,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         menu.addItem(withTitle: "Quit Quoll", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         item.menu = menu
         statusItem = item
+        if ProcessInfo.processInfo.environment["QUOLL_DEBUG"] != nil {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                let frame = item.button?.window?.frame ?? .zero
+                FileHandle.standardError.write(Data("status item: visible=\(item.isVisible) frame=\(frame) screen=\(item.button?.window?.screen?.frame ?? .zero)\n".utf8))
+            }
+        }
     }
 
     func menuWillOpen(_ menu: NSMenu) {

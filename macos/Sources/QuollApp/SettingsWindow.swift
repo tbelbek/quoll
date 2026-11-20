@@ -1,5 +1,6 @@
 import AppKit
 import QuollCore
+import ServiceManagement
 
 /// Minimal settings: hotkey, roots, excludes, includes, default excludes.
 /// One rule per line; Save applies them (a rescan when roots or rules changed).
@@ -10,6 +11,8 @@ final class SettingsWindow: NSWindow {
     private let excludes = SettingsWindow.textArea()
     private let includes = SettingsWindow.textArea()
     private let defaults = NSButton(checkboxWithTitle: "", target: nil, action: nil)
+    private let atLogin = NSButton(checkboxWithTitle: "Open Quoll at login", target: nil, action: nil)
+    private let loginNote = NSTextField(labelWithString: "")
     private let onSave: (Preferences) -> Void
     private var base: Preferences
 
@@ -45,7 +48,10 @@ final class SettingsWindow: NSWindow {
         let buttons = NSStackView(views: [NSView(), cancel, save])
         buttons.orientation = .horizontal
 
+        loginNote.font = .systemFont(ofSize: 11)
+        loginNote.textColor = .secondaryLabelColor
         let stack = NSStackView(views: [
+            atLogin, loginNote,
             label("Global hotkey"), hotkeyField,
             hint("e.g. super+s (⌃⌥⌘S), hyper+s (⌃⌥⇧⌘S), control+option+space, cmd+shift+f"), hotkeyNote,
             label("Folders to index (one per line)"), roots.scroll,
@@ -87,6 +93,33 @@ final class SettingsWindow: NSWindow {
         excludes.text.string = settings.excludes.joined(separator: "\n")
         includes.text.string = settings.includes.joined(separator: "\n")
         defaults.state = settings.useDefaultExcludes ? .on : .off
+        refreshLoginState()
+    }
+
+    /// Login item through SMAppService (macOS 13+): the system lists it under
+    /// System Settings › General › Login Items, where the user can also remove it.
+    private func refreshLoginState() {
+        let status = SMAppService.mainApp.status
+        atLogin.state = status == .enabled ? .on : .off
+        switch status {
+        case .requiresApproval:
+            loginNote.stringValue = "Waiting for approval in System Settings › General › Login Items."
+        case .notFound:
+            loginNote.stringValue = "Move Quoll to /Applications to open it at login."
+        default:
+            loginNote.stringValue = ""
+        }
+    }
+
+    private func applyLogin() {
+        let wanted = atLogin.state == .on
+        let enabled = SMAppService.mainApp.status == .enabled
+        guard wanted != enabled else { return }
+        do {
+            if wanted { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
+        } catch {
+            loginNote.stringValue = "Login item: \(error.localizedDescription)"
+        }
     }
 
     @objc private func saveClicked() {
@@ -107,7 +140,10 @@ final class SettingsWindow: NSWindow {
         updated.includes = lines(includes)
         updated.useDefaultExcludes = defaults.state == .on
         if updated.roots.isEmpty { updated.roots = base.roots }
+        applyLogin()
         onSave(updated)
+        refreshLoginState()
+        if SMAppService.mainApp.status == .requiresApproval { return }   // keep the note visible
         orderOut(nil)
     }
 

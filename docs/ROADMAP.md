@@ -185,7 +185,7 @@ Done in 0.2.0:
 
 Open:
 
-- [ ] Start at login (`SMAppService`): without it the hotkey is dead after a reboot.
+- [x] Start at login (`SMAppService`), a checkbox in Settings (0.2.1).
 - [ ] Quick Look on ⌘Y.
 - [ ] HTTP bound to loopback only; drop Basic auth and static file serving.
 - [ ] Reject control paths longer than `sun_path` (104 bytes) with a clear error.
