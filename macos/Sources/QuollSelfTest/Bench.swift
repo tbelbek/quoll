@@ -213,14 +213,26 @@ func runDurability(_ arguments: [String]) -> Int32 {
     settings.dataDirectory = data
     settings.controlPath = data + "/q.sock"
 
-    func freshPaths() -> Set<String> {
+    func freshPaths(_ scanRoot: String? = nil) -> Set<String> {
         let snapshot = base + "/fresh-\(UUID().uuidString)"
         defer { try? fm.removeItem(atPath: snapshot) }
-        guard (try? IndexStore.scan(roots: [root], rules: settings.excludeRules, into: snapshot, meta: SnapshotMeta())) != nil
+        let target = Scanner.canonical(scanRoot ?? root)
+        guard (try? IndexStore.scan(roots: [target], rules: settings.excludeRules, into: snapshot, meta: SnapshotMeta())) != nil
         else { return [] }
         let store = IndexStore()
         try? store.write { try store.adopt(directory: snapshot) }
         return store.read { Set((0..<store.count).filter { !store.isDead($0) }.map { store.path($0) }) }
+    }
+    func noDuplicates(_ service: QuollService) -> Bool {
+        let store = service.store
+        return store.read { store.liveFiles + store.liveFolders == Set((0..<store.count).filter { !store.isDead($0) }.map { store.path($0) }).count }
+    }
+    func runShell(_ script: String) {
+        let shell = Process()
+        shell.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        shell.arguments = ["-c", script]
+        try? shell.run()
+        shell.waitUntilExit()
     }
     func livePaths(_ service: QuollService) -> Set<String> {
         let store = service.store
@@ -295,6 +307,26 @@ func runDurability(_ arguments: [String]) -> Int32 {
         print("      counts: live \(live.count) expected \(liveExpected.count)")
     }
     check(second.fullScans == 0, "live changes did not rescan")
+    check(noDuplicates(second), "no entry indexed twice")
+
+    // 4b. Names that fold alike are different files (résumé vs resume).
+    runShell("cd '\(root)' && : > d1/résumé.txt && sleep 1.5 && : > d1/resume.txt")
+    let foldExpected = freshPaths()
+    let foldTime = waitUntil(10) { second.drain(); return livePaths(second) == foldExpected }
+    check(foldTime != nil && livePaths(second).contains(root + "/d1/résumé.txt") && livePaths(second).contains(root + "/d1/resume.txt"),
+          "résumé.txt and resume.txt both indexed")
+    runShell("rm '\(root)/d1/resume.txt'")
+    let afterRemove = freshPaths()
+    _ = waitUntil(10) { second.drain(); return livePaths(second) == afterRemove }
+    check(livePaths(second).contains(root + "/d1/résumé.txt") && !livePaths(second).contains(root + "/d1/resume.txt"),
+          "removing resume.txt keeps résumé.txt")
+
+    // 4c. Root replaced while running: one rescan, catalog matches the new root.
+    runShell("cd '\(base)' && mv root root.old && mkdir root && : > root/after-replace.txt && rm -rf root.old")
+    let replaced = freshPaths()
+    let replaceTime = waitUntil(20) { second.drain(); return livePaths(second) == replaced }
+    check(replaceTime != nil, "replaced root converges (\(replaceTime.map { String(format: "%.2f", $0) } ?? "timeout") s)")
+    check(second.fullScans == 1, "replaced root costs exactly one rescan (\(second.fullScans))")
 
     // 5. Compaction keeps the live view; reload equals it.
     let before = livePaths(second)
@@ -306,6 +338,25 @@ func runDurability(_ arguments: [String]) -> Int32 {
     third.drain()
     check(livePaths(third) == before, "snapshot after compaction reloads the same tree")
     third.stop()
+
+    // 6. A root inside an excluded area (.cache), given through a symlink.
+    let inner = base + "/area/.cache/proj"
+    try? fm.createDirectory(atPath: inner + "/src", withIntermediateDirectories: true)
+    touch(inner + "/src/a.txt")
+    try? fm.createSymbolicLink(atPath: base + "/link", withDestinationPath: inner)
+    var other = settings
+    other.roots = [base + "/link"]
+    other.dataDirectory = base + "/data2"
+    other.controlPath = base + "/data2/q.sock"
+    let fourth = QuollService(settings: other)
+    do { try fourth.start() } catch { print("fourth start failed: \(error)"); return 1 }
+    fourth.drain()
+    check(livePaths(fourth).contains(Scanner.canonical(inner) + "/src/a.txt"), "symlinked root inside an excluded area is indexed")
+    runShell("cd '\(inner)' && : > src/b.txt && mkdir -p new && : > new/c.txt")
+    let innerExpected = freshPaths(inner)
+    let innerTime = waitUntil(10) { fourth.drain(); return livePaths(fourth) == innerExpected }
+    check(innerTime != nil, "live changes under that root are kept (\(innerExpected.count) entries)")
+    fourth.stop()
 
     print(failed == 0 ? "\nm4 checks passed" : "\n\(failed) m4 check(s) failed")
     return failed == 0 ? 0 : 1

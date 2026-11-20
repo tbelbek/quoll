@@ -61,6 +61,8 @@ public final class QuollService {
     public private(set) var replayDone = false
     /// Full scans since start (tests: replay must not need one).
     public private(set) var fullScans = 0
+    /// Set during a batch when a root itself changed.
+    private var needsRebuild = false
     /// Seconds the last compaction took.
     public private(set) var lastCompaction: TimeInterval = 0
 
@@ -126,8 +128,10 @@ public final class QuollService {
         guard running else { lock.unlock(); return }
         running = false
         lock.unlock()
-        monitor?.stop()
-        monitor = nil
+        stateQueue.sync {
+            monitor?.stop()
+            monitor = nil
+        }
         http?.stop()
         http = nil
         control?.stop()
@@ -145,7 +149,7 @@ public final class QuollService {
 
     private func startWatcher(since: UInt64) {
         monitor?.stop()
-        let watcher = ChangeWatcher(paths: settings.roots, sinceWhen: since) { [weak self] events in
+        let watcher = ChangeWatcher(paths: roots, sinceWhen: since) { [weak self] events in
             self?.stateQueue.async { self?.apply(events) }
         }
         do {
@@ -158,8 +162,13 @@ public final class QuollService {
 
     // MARK: - Snapshot
 
+    /// Existing roots, canonicalised (D13).
+    private var roots: [String] {
+        settings.roots.map(Scanner.canonical).filter { isDirectory($0) }
+    }
+
     private var fingerprint: String {
-        (settings.roots + [settings.excludeRules.fingerprint]).joined(separator: "\u{1d}")
+        (roots + [settings.excludeRules.fingerprint]).joined(separator: "\u{1d}")
     }
 
     /// Adopts the current snapshot when it matches the roots, rules and volumes.
@@ -172,7 +181,7 @@ public final class QuollService {
             return false
         }
         let meta = store.meta
-        guard meta.rulesFingerprint == fingerprint, meta.roots == settings.roots.filter({ isDirectory($0) }),
+        guard meta.rulesFingerprint == fingerprint, meta.roots == roots,
               meta.devices == meta.roots.map(ChangeWatcher.volumeUUID(for:)), meta.eventId > 0 else {
             log("roots, rules or volumes changed since the snapshot; rescanning")
             return false
@@ -196,7 +205,7 @@ public final class QuollService {
         meta.eventId = eventId
         meta.rulesFingerprint = fingerprint
         do {
-            let roots = settings.roots.filter { isDirectory($0) }
+            let roots = self.roots
             meta.devices = roots.map(ChangeWatcher.volumeUUID(for:))
             let stats = try ScanHelper.scan(roots: roots, settings: settings, into: directory, meta: meta)
             try store.write { try store.adopt(directory: directory) }
@@ -268,15 +277,19 @@ public final class QuollService {
     /// Scans `paths` as the new roots (or rescans the current roots when empty).
     @discardableResult
     public func scan(paths: [String], replaceRoots: Bool = true) -> BulkScanner.Stats {
-        let normalized = paths.map(Scanner.standardize)
-        if replaceRoots, !normalized.isEmpty, normalized != settings.roots {
+        let normalized = paths.map(Scanner.canonical)
+        // Settings, the store and the watcher only change on the state queue.
+        return stateQueue.sync {
+            let id = ChangeWatcher.currentEventId
+            guard replaceRoots, !normalized.isEmpty, normalized != settings.roots else {
+                return rebuildLocked(eventId: id)
+            }
             settings.roots = normalized
             try? settings.save()
-            let stats = rebuild()
-            startWatcher(since: store.meta.eventId)
+            let stats = rebuildLocked(eventId: id)
+            startWatcher(since: id)
             return stats
         }
-        return rebuild()
     }
 
     /// Blocks until all queued change batches have been applied (tests, CLI).
@@ -300,7 +313,7 @@ public final class QuollService {
             rebuildLocked(eventId: ChangeWatcher.currentEventId)
             return
         }
-        let rules = settings.excludeRules
+        let baseRules = settings.excludeRules
         var mustScan = Set<String>()
         var unique = Set<String>()
         for event in events where !event.isHistoryDone {
@@ -313,12 +326,14 @@ public final class QuollService {
             let ca = a.utf8.reduce(0) { $0 + ($1 == 47 ? 1 : 0) }, cb = b.utf8.reduce(0) { $0 + ($1 == 47 ? 1 : 0) }
             return ca != cb ? ca < cb : a < b
         }
+        needsRebuild = false
         store.write {
             var missing: [String] = []
             for path in ordered {
-                guard isUnderRoot(path) else { continue }
-                if rules.excludesAnyComponent(of: path) {
-                    if let id = store.resolve(path), id >= store.rootCount { store.removeSubtree(id) }
+                guard let root = store.root(of: path) else { continue }
+                let rules = baseRules.relative(to: root)
+                if rules.excludesAnyComponent(of: path, below: root) {
+                    if let id = store.resolve(path, exact: true), id >= store.rootCount { store.removeSubtree(id) }
                     continue
                 }
                 var st = stat()
@@ -326,16 +341,24 @@ public final class QuollService {
                     missing.append(path)
                     continue
                 }
-                upsert(path, st, rules: rules, rescan: mustScan.contains(path))
+                upsert(path, st, root: root, rules: rules, rescan: mustScan.contains(path))
             }
             // Removals last: a folder that moved was re-parented above, by inode.
             for path in missing {
                 var st = stat()
-                guard lstat(path, &st) != 0, let id = store.resolve(path), id >= store.rootCount else { continue }
+                guard lstat(path, &st) != 0, let id = store.resolve(path, exact: true) else { continue }
+                if id < store.rootCount { needsRebuild = true; continue }
                 store.removeSubtree(id)
             }
         }
         appliedEventId = max(appliedEventId, lastId)
+        if needsRebuild {
+            // A root was replaced, deleted or asked for a full rescan: walk it in the
+            // helper process, never inside the long-running service (D11).
+            log("root changed; rescanning")
+            rebuildLocked(eventId: ChangeWatcher.currentEventId)
+            return
+        }
         if store.pendingChanges > 0 { lastScan = Date() }
         scheduleCompaction()
     }
@@ -382,32 +405,51 @@ public final class QuollService {
     }
 
     /// Brings one existing path into the catalog. Caller holds the write lock.
-    private func upsert(_ path: String, _ st: stat, rules: ExcludeRules, rescan: Bool) {
+    private func upsert(_ path: String, _ st: stat, root: String, rules: ExcludeRules, rescan: Bool) {
         let isDir = st.st_mode & S_IFMT == S_IFDIR
         let isLink = st.st_mode & S_IFMT == S_IFLNK
         let meta = Self.entryMeta(st)
         let name = Self.trueName(of: path) ?? (path as NSString).lastPathComponent
 
-        if let id = store.resolve(path) {
+        // Exact spelling first; a folded match (case/diacritics) only counts when it
+        // is the same object on disk (a case-only rename), never a different file
+        // that happens to fold the same (`resume` vs `résumé`).
+        var found = store.resolve(path, exact: true)
+        if found == nil, let candidate = store.resolve(path), candidate >= store.rootCount {
+            var other = stat()
+            if lstat(store.path(candidate), &other) == 0, other.st_ino == st.st_ino, other.st_dev == st.st_dev {
+                found = candidate
+            }
+        }
+
+        if let id = found {
             let sameKind = store.isDirectory(id) == isDir
             let sameFolder = !isDir || store.inode(ofDirectory: id).map { $0 == 0 || $0 == UInt64(st.st_ino) } ?? true
+            if id < store.rootCount {
+                if !sameFolder || rescan { needsRebuild = true } else { store.setMeta(id, meta) }
+                return
+            }
             if sameKind && sameFolder {
                 store.setMeta(id, meta)
-                if String(decoding: store.raw(id), as: UTF8.self) != name, id >= store.rootCount {
+                if String(decoding: store.raw(id), as: UTF8.self) != name {
                     rename(id, to: store.parent(id), name: name)
                 }
                 if isDir && rescan {
                     for child in store.children(of: id) { store.removeSubtree(child) }
-                    store.scanSubtree(id, path: path, rules: rules)
+                    store.scanSubtree(id, path: path, rules: rules, inherited: rules.isPassThrough(path, below: root))
                 }
                 return
             }
-            guard id >= store.rootCount else { return }
             store.removeSubtree(id)
         }
 
         let parentPath = (path as NSString).deletingLastPathComponent
-        guard let parent = ensureFolder(parentPath, rules: rules) else { return }
+        guard let parent = ensureFolder(parentPath, root: root, rules: rules) else { return }
+        // Adding a missing parent walks it, which may already have found this entry.
+        if let id = store.resolve(path, exact: true) {
+            store.setMeta(id, meta)
+            return
+        }
 
         if isDir, let moved = store.directory(withInode: UInt64(st.st_ino)), moved >= store.rootCount {
             let oldPath = store.path(moved)
@@ -427,8 +469,7 @@ public final class QuollService {
             }
         }
         if isDir && !isLink {
-            let inherited = rules.verdict(name: name, path: path, isDirectory: true) == .passThrough
-            store.scanSubtree(id, path: path, rules: rules, inherited: inherited)
+            store.scanSubtree(id, path: path, rules: rules, inherited: rules.isPassThrough(path, below: root))
         }
     }
 
@@ -441,13 +482,13 @@ public final class QuollService {
 
     /// Id of the folder at `path`, adding missing ancestors (coalesced events can
     /// report a deep path before its parents).
-    private func ensureFolder(_ path: String, rules: ExcludeRules) -> Int? {
-        if let id = store.resolve(path) { return store.isDirectory(id) ? id : nil }
-        guard isUnderRoot(path), !rules.excludesAnyComponent(of: path) else { return nil }
+    private func ensureFolder(_ path: String, root: String, rules: ExcludeRules) -> Int? {
+        if let id = store.resolve(path, exact: true) { return store.isDirectory(id) ? id : nil }
+        guard isUnderRoot(path), !rules.excludesAnyComponent(of: path, below: root) else { return nil }
         var st = stat()
         guard lstat(path, &st) == 0, st.st_mode & S_IFMT == S_IFDIR else { return nil }
-        upsert(path, st, rules: rules, rescan: false)
-        return store.resolve(path)
+        upsert(path, st, root: root, rules: rules, rescan: false)
+        return store.resolve(path, exact: true)
     }
 
     // MARK: - Status

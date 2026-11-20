@@ -45,6 +45,9 @@ public enum ScanHelper {
 
     /// Scans in a child process; falls back to scanning in-process if the child
     /// cannot be started.
+    /// Upper bound for one full scan (2.3M entries take ~12 s on the Air).
+    static var timeout: TimeInterval = 600
+
     static func scan(roots: [String], settings: Preferences, into directory: String,
                      meta: SnapshotMeta) throws -> BulkScanner.Stats {
         guard let executable = Bundle.main.executableURL else {
@@ -62,15 +65,24 @@ public enum ScanHelper {
         let output = Pipe()
         process.standardOutput = output
         process.standardError = FileHandle.nullDevice
+        let exited = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in exited.signal() }
         do {
             try process.run()
         } catch {
             return try IndexStore.scan(roots: roots, rules: settings.excludeRules, into: directory, meta: meta)
         }
+        // A wedged volume must not block the service's state queue forever.
+        if exited.wait(timeout: .now() + timeout) == .timedOut {
+            process.terminate()
+            _ = exited.wait(timeout: .now() + 5)
+            throw StoreError.io("scan helper timed out after \(Int(timeout)) s")
+        }
         let data = output.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
         guard let reply = try? JSONDecoder().decode(Reply.self, from: data) else {
-            throw StoreError.io("scan helper exited with status \(process.terminationStatus)")
+            // Crashed rather than failed: scan in-process so the index is not left empty.
+            try? FileManager.default.removeItem(atPath: directory)
+            return try IndexStore.scan(roots: roots, rules: settings.excludeRules, into: directory, meta: meta)
         }
         if let error = reply.error { throw StoreError.io("scan helper: \(error)") }
         var stats = BulkScanner.Stats()

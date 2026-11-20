@@ -72,7 +72,7 @@ public struct ExcludeRules: Sendable {
         }
     }
 
-    private let excludes: RuleSet
+    private var excludes: RuleSet
     private let includes: RuleSet
     private let hard: RuleSet
 
@@ -123,23 +123,40 @@ public struct ExcludeRules: Sendable {
     }
 
     /// Is an arbitrary absolute path outside the index? Used for watcher events,
-    /// where the ancestors have not been checked yet.
-    public func excludesAnyComponent(of path: String) -> Bool {
+    /// where the ancestors have not been checked yet. Only components below
+    /// `root` count (a root may itself sit inside an excluded area).
+    public func excludesAnyComponent(of path: String, below root: String = "") -> Bool {
         if hard.matchesPath(path) { return true }
         if includes.matchesPath(path) { return false }
-        if excludes.matchesPath(path) { return !leadsToInclude(path) }
+        // A folder on the way to an include is indexed (pass-through), as in the walk.
+        if leadsToInclude(path) { return false }
+        if excludes.matchesPath(path) { return true }
         guard excludes.hasNameRules else { return false }
-        var prefix = ""
-        for component in path.split(separator: "/") {
+        let relative = !root.isEmpty && path.hasPrefix(root) ? String(path.dropFirst(root.count)) : path
+        for component in relative.split(separator: "/") {
             let name = String(component)
-            prefix += "/" + name
-            if excludes.matchesName(name) && !includes.matchesName(name) {
-                // Excluded ancestor: only an include at or below this point saves it.
-                if includes.matchesPath(path) { return false }
-                return !(prefix == path && leadsToInclude(path))
-            }
+            if excludes.matchesName(name) && !includes.matchesName(name) { return true }
         }
         return false
+    }
+
+    /// An indexed folder whose other children are excluded (an excluded folder on
+    /// the way to an include, or one below such a folder). Walks of it must start
+    /// with `inheritedExclusion`.
+    public func isPassThrough(_ path: String, below root: String = "") -> Bool {
+        guard !includes.matchesPath(path), leadsToInclude(path) else { return false }
+        if excludes.matchesPath(path) { return true }
+        let relative = !root.isEmpty && path.hasPrefix(root) ? String(path.dropFirst(root.count)) : path
+        return relative.split(separator: "/").contains { excludes.matchesName(String($0)) && !includes.matchesName(String($0)) }
+    }
+
+    /// The same rules without exclude path rules that cover `root` itself: a root
+    /// the user added inside an excluded area is indexed, not emptied.
+    public func relative(to root: String) -> ExcludeRules {
+        var copy = self
+        copy.excludes.paths.removeAll { root == $0 || root.hasPrefix($0 + "/") }
+        copy.excludes.pathGlobs.removeAll { fnmatch($0, root, 0) == 0 }
+        return copy
     }
 
     /// Some include path lies strictly below `path`.

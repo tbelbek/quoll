@@ -181,6 +181,17 @@ public final class BulkScanner {
         batch.reset()
         let fd = open(job.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
         var unreadable = fd < 0
+        var folder = stat()
+        if fd >= 0, fstat(fd, &folder) == 0, folder.st_dev != job.device {
+            // A mount point inside the root: stay on the root's volume.
+            close(fd)
+            batch.reset()
+            sinkLock.lock()
+            _ = sink.appendChildren(of: job.id, inode: job.inode, batch: batch)
+            stats.folders += 1
+            sinkLock.unlock()
+            return
+        }
         if fd >= 0 {
             defer { close(fd) }
             var list = attrlist()
@@ -305,8 +316,15 @@ extension IndexStore {
             meta.roots.append(root)
             jobs.append(BulkScanner.Job(path: root, id: id, inode: UInt64(st.st_ino), inherited: false, device: st.st_dev))
         }
-        var stats = BulkScanner(rules: rules, threads: threads).run(jobs, sink: writer)
-        stats.entries += jobs.count
+        // One walk per root, each with rules relative to that root (D13).
+        var stats = BulkScanner.Stats()
+        for job in jobs {
+            let part = BulkScanner(rules: rules.relative(to: job.path), threads: threads).run([job], sink: writer)
+            stats.entries += part.entries + 1
+            stats.folders += part.folders
+            stats.unreadable += part.unreadable
+            stats.duration += part.duration
+        }
         try writer.finish(meta: meta)
         return stats
     }

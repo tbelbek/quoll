@@ -170,7 +170,7 @@ private func commandSearch(_ arguments: [String], settings: Preferences) {
 
 private func commandScan(_ arguments: [String], settings: Preferences) {
     let paths = positionals(arguments, optionsWithValues: ["--exclude"])
-    let roots = paths.isEmpty ? settings.roots : paths.map(Scanner.standardize)
+    let roots = (paths.isEmpty ? settings.roots : paths).map(Scanner.canonical)
     let excludes = settings.excludes + [value(for: "--exclude", in: arguments)].compactMap { $0 }
     var effective = settings
     effective.excludes = excludes
@@ -393,14 +393,14 @@ private func commandSettings(_ arguments: [String], settings: Preferences) {
         return
     }
     if let root = value(for: "--add-root", in: arguments) {
-        let normalized = Scanner.standardize(root)
+        let normalized = Scanner.canonical(root)
         if !updated.roots.contains(normalized) {
             updated.roots.append(normalized)
             changed = true
         }
     }
     if let root = value(for: "--remove-root", in: arguments) {
-        let normalized = Scanner.standardize(root)
+        let normalized = Scanner.canonical(root)
         updated.roots.removeAll { $0 == normalized }
         changed = true
     }

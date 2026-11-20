@@ -155,3 +155,28 @@ activity cost 0.14 s CPU and zero snapshot writes.
 Open (roadmap risk 1): replay after days of sleep is untested; a gap that
 FSEvents can no longer replay arrives as dropped/wrapped flags and triggers a
 full rescan, so it costs time, not correctness.
+
+## D13 — Review fixes: exact lookups, canonical roots, per-root rules
+
+An independent review of M2–M4 found eight defects; each now has a regression
+step in `quoll-selftest --m4`:
+
+- Event paths resolve **exactly**; a folded (case/diacritic) match is accepted
+  only when it is the same inode (case-only rename). Before, creating
+  `resume.txt` renamed or deleted the indexed `résumé.txt`.
+- After adding a missing parent folder, the entry is looked up again instead of
+  appended a second time (duplicate subtree).
+- A `MustScanSubDirs` rescan of a pass-through folder keeps the inherited
+  exclusion; the watcher treats every folder on the way to an include as indexed,
+  exactly like the walker (it used to drop their events).
+- A root that is replaced, deleted or asked to rescan triggers one full scan in
+  the helper process instead of being skipped or walked in-process.
+- Roots are canonicalised with `realpath` (symlinks, on-disk letter case);
+  FSEvents reports real paths.
+- Rules are applied relative to each root: exclude rules covering the root are
+  dropped and only components below the root are checked, so a root inside an
+  excluded area (`~/x/.cache/proj`) is indexed and stays current.
+- `scan` over the socket changes roots, store and watcher on the state queue only.
+- The scan helper has a 10-minute timeout and falls back to an in-process scan if
+  the child crashes; the walker re-checks the device after `open` (mount points);
+  folder lookups among newly added children use a name hash (was O(n²)).

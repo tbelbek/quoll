@@ -226,6 +226,21 @@ public final class IndexStore {
     private var metaOverride: [UInt32: EntryMeta] = [:]
     /// Children added to a folder after the snapshot (delta ids or moved base ids).
     private var added: [UInt32: [UInt32]] = [:]
+    /// Same children keyed by folder + folded-name hash, so path lookups in a
+    /// folder that received many new entries stay O(1).
+    private var addedByName: [Int: [UInt32]] = [:]
+
+    @inline(__always) private static func nameKey(_ folder: Int, _ folded: UnsafeBufferPointer<UInt8>) -> Int {
+        var hasher = Hasher()
+        hasher.combine(folder)
+        hasher.combine(bytes: UnsafeRawBufferPointer(folded))
+        return hasher.finalize()
+    }
+
+    private func indexAdded(_ id: Int, under folder: Int) {
+        added[UInt32(folder), default: []].append(UInt32(id))
+        addedByName[Self.nameKey(folder, folded(id)), default: []].append(UInt32(id))
+    }
 
     public private(set) var liveFiles = 0
     public private(set) var liveFolders = 0
@@ -312,7 +327,7 @@ public final class IndexStore {
         for buffer in [dFoldStart, dFoldLen, dRawStart, dRawLen, dParent] { buffer.removeAll() }
         dFolded.removeAll(); dRaw.removeAll(); dMeta.removeAll(); dFlags.removeAll()
         dInode = [:]; inodeToDelta = [:]
-        parentOverride = [:]; nameOverride = [:]; metaOverride = [:]; added = [:]
+        parentOverride = [:]; nameOverride = [:]; metaOverride = [:]; added = [:]; addedByName = [:]
         dead.clearAll(); overridden.clearAll(); metaChanged.clearAll()
         pendingChanges = 0
     }
@@ -468,11 +483,13 @@ public final class IndexStore {
             }
         }
         if let extra = added[UInt32(d)] {
-            for c in extra where !dead.test(Int(c)) && parent(Int(c)) == d
-                && !out[mark...].contains(Int(c)) {
+            var seen = Set<UInt32>()
+            seen.reserveCapacity(extra.count)
+            for c in extra where !dead.test(Int(c)) && parent(Int(c)) == d && seen.insert(c).inserted {
                 out.append(Int(c))
             }
         }
+        _ = mark
     }
 
     public func inode(ofDirectory d: Int) -> UInt64? {
@@ -496,8 +513,9 @@ public final class IndexStore {
         return nil
     }
 
-    /// Child of folder `d` named `name` (exact raw match preferred, folded fallback).
-    public func child(of d: Int, named name: String) -> Int? {
+    /// Child of folder `d` named `name`. `exact`: the raw name must match byte for
+    /// byte; otherwise a folded match (case/diacritics) is accepted as fallback.
+    public func child(of d: Int, named name: String, exact: Bool = false) -> Int? {
         let rawName = Array(name.utf8)
         let key = Fold.fold(name)
         var foldedMatch: Int?
@@ -520,31 +538,36 @@ public final class IndexStore {
                 c += 1
             }
         }
-        if let extra = added[UInt32(d)] {
-            for c in extra.reversed() where !dead.test(Int(c)) && parent(Int(c)) == d {
-                if Self.equal(raw(Int(c)), rawName) { return Int(c) }
-                if foldedMatch == nil, key.withUnsafeBufferPointer({ Self.compare(folded(Int(c)), $0) == 0 }) {
-                    foldedMatch = Int(c)
-                }
+        let bucket = key.withUnsafeBufferPointer { addedByName[Self.nameKey(d, $0)] } ?? []
+        for c in bucket.reversed() where !dead.test(Int(c)) && parent(Int(c)) == d {
+            if Self.equal(raw(Int(c)), rawName) { return Int(c) }
+            if foldedMatch == nil, key.withUnsafeBufferPointer({ Self.compare(folded(Int(c)), $0) == 0 }) {
+                foldedMatch = Int(c)
             }
         }
-        return foldedMatch
+        return exact ? nil : foldedMatch
     }
 
-    /// Id of the entry at an absolute path, if indexed.
-    public func resolve(_ path: String) -> Int? {
+    /// Id of the entry at an absolute path, if indexed. `exact`: every component
+    /// must match its stored name byte for byte.
+    public func resolve(_ path: String, exact: Bool = false) -> Int? {
         for r in 0..<rootCount where !dead.test(r) {
             let root = meta.roots[r]
             guard path == root || path.hasPrefix(root == "/" ? "/" : root + "/") else { continue }
             var cursor = r
             let rest = path.dropFirst(root.count)
             for component in rest.split(separator: "/") {
-                guard let next = child(of: cursor, named: String(component)) else { return nil }
+                guard let next = child(of: cursor, named: String(component), exact: exact) else { return nil }
                 cursor = next
             }
             return cursor
         }
         return nil
+    }
+
+    /// Root whose subtree holds `path`.
+    public func root(of path: String) -> String? {
+        meta.roots.first { path == $0 || path.hasPrefix($0 == "/" ? "/" : $0 + "/") }
     }
 
     // MARK: Writing (caller holds the write lock)
@@ -565,7 +588,7 @@ public final class IndexStore {
         } else {
             liveFiles += 1
         }
-        if p >= 0 { added[UInt32(p), default: []].append(UInt32(id)) }
+        if p >= 0 { indexAdded(id, under: p) }
         pendingChanges += 1
         return id
     }
@@ -618,7 +641,7 @@ public final class IndexStore {
             dFoldStart[d] = UInt32(dFolded.count); dFoldLen[d] = UInt32(f.count); dFolded.append(contentsOf: f)
             dRawStart[d] = UInt32(dRaw.count); dRawLen[d] = UInt32(r.count); dRaw.append(contentsOf: r)
         }
-        added[UInt32(p), default: []].append(UInt32(i))
+        indexAdded(i, under: p)
         pendingChanges += 1
     }
 
