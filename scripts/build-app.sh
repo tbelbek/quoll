@@ -20,6 +20,7 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN_DIR/QuollApp" "$APP/Contents/MacOS/Quoll"
 cp "$BIN_DIR/quoll" "$APP/Contents/MacOS/quoll"   # CLI ships inside the bundle
 chmod +x "$APP/Contents/MacOS/Quoll" "$APP/Contents/MacOS/quoll"
+cp "$ROOT/resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"   # resources/make-icon.sh
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -32,6 +33,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <string>Quoll</string>
     <key>CFBundleIdentifier</key>
     <string>com.quoll.search</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundleExecutable</key>
     <string>Quoll</string>
     <key>CFBundlePackageType</key>
