@@ -115,7 +115,10 @@ final class SearchController: NSViewController, NSTableViewDataSource, NSTableVi
         root.blendingMode = .behindWindow
         root.state = .active
 
-        field.font = .systemFont(ofSize: 15)
+        // Large control (28 pt) with the standard 13 pt font: a bigger font in a
+        // regular field clips descenders (measured with an offscreen render).
+        field.controlSize = .large
+        field.font = .systemFont(ofSize: 13)
         field.placeholderAttributedString = NSAttributedString(
             string: "Search  —  *.pdf, ending:md, changed:today, under:Repos",
             attributes: [.font: NSFont.systemFont(ofSize: 13), .foregroundColor: NSColor.tertiaryLabelColor])

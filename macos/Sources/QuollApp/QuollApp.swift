@@ -1,5 +1,6 @@
 import AppKit
 import QuollCore
+import ServiceManagement
 
 /// Menu-bar app with an Everything-style search panel and a global hotkey.
 /// AppKit only: no SwiftUI scene machinery in a process that idles in the background.
@@ -53,6 +54,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             self.panel = panel
         }
         registerHotKey()
+        applyLoginItem()
         // QUOLL_SHOW=<query>: open the panel at launch (screenshots, manual testing).
         if let query = ProcessInfo.processInfo.environment["QUOLL_SHOW"] {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
@@ -78,8 +80,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             countItem.title = "service error: \(error.localizedDescription)"
             return nil
         }
+        service.onShow = { [weak self] in self?.showPanel() }
         self.service = service
         return InProcessBackend(service: service)
+    }
+
+    /// `openAtLogin` from settings.json (also set by `quoll settings --open-at-login`).
+    private func applyLoginItem() {
+        guard let wanted = settings.openAtLogin else { return }
+        let enabled = SMAppService.mainApp.status == .enabled
+        if wanted && !enabled { try? SMAppService.mainApp.register() }
+        if !wanted && enabled { try? SMAppService.mainApp.unregister() }
+    }
+
+    /// `open -a Quoll` while running brings the window up.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        showPanel()
+        return false
+    }
+
+    private func showPanel() {
+        guard let panel else { return }
+        NSApp.activate(ignoringOtherApps: true)
+        panel.makeKeyAndOrderFront(nil)
+        controller?.willShow()
     }
 
     private func registerHotKey() {
@@ -98,9 +122,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         if panel.isVisible && panel.isKeyWindow && NSApp.isActive {
             hidePanel()
         } else {
-            NSApp.activate(ignoringOtherApps: true)
-            panel.makeKeyAndOrderFront(nil)
-            controller?.willShow()
+            showPanel()
         }
     }
 

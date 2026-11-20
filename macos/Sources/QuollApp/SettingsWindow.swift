@@ -141,6 +141,7 @@ final class SettingsWindow: NSWindow {
         updated.useDefaultExcludes = defaults.state == .on
         if updated.roots.isEmpty { updated.roots = base.roots }
         applyLogin()
+        updated.openAtLogin = atLogin.state == .on
         onSave(updated)
         refreshLoginState()
         if SMAppService.mainApp.status == .requiresApproval { return }   // keep the note visible

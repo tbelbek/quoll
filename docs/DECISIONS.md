@@ -110,7 +110,7 @@ is idempotent (reconcile by `lstat`).
 | Empty query p95, newest first | 4.0 ms | 3.4–4.5 ms | < 5 ms ✓ |
 | Empty query p95, by name | 5.3 ms | 4.1–10.9 ms (noisy) | < 5 ms ~ |
 | `*.md` p95 | 4.9 ms | 8.2 ms | – |
-| `path:.config json` p95 | 20.8 ms | 46–56 ms | – (path rebuilt per hit) |
+| `path:` + name (`path:<dot-folder> json`) p95 | 20.8 ms | 46–56 ms | – (path rebuilt per hit) |
 
 Equivalence (`quoll-selftest --equiv ~/Repos`, 380k entries): all 28 queries return
 exactly the entries the 1.0 `Matcher` accepts. Run-to-run noise on this machine

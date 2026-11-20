@@ -59,6 +59,8 @@ public final class QuollService {
     private var appliedEventId: UInt64 = 0
     public private(set) var lastScan: Date?
     public private(set) var replayDone = false
+    /// Set by the app: shows the search window (`quoll show`, for remote use).
+    public var onShow: (() -> Void)?
     /// Full scans since start (tests: replay must not need one).
     public private(set) var fullScans = 0
     /// Set during a batch when a root itself changed.
@@ -525,6 +527,11 @@ public final class QuollService {
 
     public func handle(_ request: ControlRequest) -> ControlReply {
         switch request.command {
+        case "show":
+            guard let onShow else { return .failure("unavailable", "no window in this process", id: request.id) }
+            DispatchQueue.main.async(execute: onShow)
+            return ControlReply(id: request.id, message: "shown")
+
         case "ping":
             return ControlReply(id: request.id, message: "pong")
 

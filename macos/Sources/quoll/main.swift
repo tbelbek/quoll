@@ -440,6 +440,10 @@ private func commandSettings(_ arguments: [String], settings: Preferences) {
         updated.hotkey = hotkey
         changed = true
     }
+    if let login = value(for: "--open-at-login", in: arguments) {
+        updated.openAtLogin = ["on", "yes", "true", "1"].contains(login.lowercased())
+        changed = true
+    }
     if has("--no-default-excludes", in: arguments) {
         updated.useDefaultExcludes = false
         changed = true
@@ -479,7 +483,9 @@ private func usage() {
                      [--exclude PATTERN] [--remove-exclude PATTERN] [--clear-excludes]
                      [--include PATTERN] [--remove-include PATTERN]
                      [--no-default-excludes] [--default-excludes]
+                     [--open-at-login on|off]   applied when the app starts
                      [--hotkey SPEC]   e.g. super+s (⌃⌥⌘S), hyper+s (⌃⌥⇧⌘S); restart the app
+      quoll show        bring up the search window (Quoll.app must be running)
       quoll help
 
     GLOBAL
@@ -521,6 +527,12 @@ guard let command = arguments.first else {
 let rest = Array(arguments.dropFirst())
 
 switch command {
+case "show":
+    let client = ControlClient(controlPath: openSettings(dataDirectory: dataDirectory).controlPath)
+    guard let reply = try? client.send(ControlRequest(command: "show")), reply.ok else {
+        fail("Quoll.app is not running")
+    }
+    print(reply.message ?? "shown")
 case "search", "find":
     commandSearch(rest, settings: openSettings(dataDirectory: dataDirectory))
 case "scan", "add":

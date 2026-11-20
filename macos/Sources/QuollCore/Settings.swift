@@ -39,6 +39,8 @@ public struct Preferences: Codable, Sendable {
     /// Global hotkey that shows/hides the search window, e.g. `hyper+s` (⌃⌥⇧⌘S),
     /// `control+option+space`, `cmd+shift+f`.
     public var hotkey: String
+    /// Login item wanted (the app applies it at launch); nil leaves it alone.
+    public var openAtLogin: Bool?
 
     public init(
         roots: [String],
@@ -70,7 +72,7 @@ public struct Preferences: Codable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case roots, excludes, includes, dataDirectory, controlPath, http, defaultLimit
-        case skipHidden, skipPackages, followSymlinks, useDefaultExcludes, hotkey
+        case skipHidden, skipPackages, followSymlinks, useDefaultExcludes, hotkey, openAtLogin
     }
 
     // Tolerant decoding: settings files written by older versions lack newer keys.
@@ -89,6 +91,7 @@ public struct Preferences: Codable, Sendable {
         followSymlinks = try c.decodeIfPresent(Bool.self, forKey: .followSymlinks) ?? false
         useDefaultExcludes = try c.decodeIfPresent(Bool.self, forKey: .useDefaultExcludes) ?? true
         hotkey = try c.decodeIfPresent(String.self, forKey: .hotkey) ?? "hyper+s"
+        openAtLogin = try c.decodeIfPresent(Bool.self, forKey: .openAtLogin)
     }
 
     /// Effective exclude rules: user rules, shipped defaults, and Quoll's own data
