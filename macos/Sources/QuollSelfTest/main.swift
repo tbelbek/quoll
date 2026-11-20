@@ -1,6 +1,13 @@
 import Foundation
 import QuollCore
 
+if CommandLine.arguments.contains("--bench") {
+    exit(runBench(CommandLine.arguments))
+}
+if CommandLine.arguments.contains("--equiv") {
+    exit(runEquivalence(CommandLine.arguments))
+}
+
 var failures = 0
 
 func expect(_ condition: Bool, _ name: String) {
@@ -71,82 +78,117 @@ expect(!matches("starts:ackage", entry("/tmp/Package.swift")), "starts rejects")
 expect(matches("ends:.swift", entry("/tmp/Package.swift")), "ends")
 expect(SearchParser.parse("body:needle").warnings.contains { $0.contains("body:") }, "unsupported filter warning")
 
-// Search engine
-let catalog = Catalog()
-catalog.replaceAll(with: [
-    entry("/tmp/b.txt", size: 2, modified: Date(timeIntervalSince1970: 2)),
-    entry("/tmp/a.txt", size: 1, modified: Date(timeIntervalSince1970: 1))
-], roots: ["/tmp"])
-let page = QueryEngine().search(
-    QueryOptions(query: "ending:txt", limit: 1, sort: .name, ascending: true),
-    in: catalog
-)
-expect(page.total == 2, "search total")
-expect(page.count == 1, "search limit")
-expect(page.results.first?.name == "a.txt", "search sort")
-expect(page.truncated, "search truncated flag")
+// Fixtures: build a real folder tree, scan it into a snapshot, map it.
+func makeTree(_ files: [String: Int], dirs: [String] = []) throws -> String {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("qt-" + UUID().uuidString)
+    let fm = FileManager.default
+    try fm.createDirectory(at: root, withIntermediateDirectories: true)
+    for dir in dirs { try fm.createDirectory(at: root.appendingPathComponent(dir), withIntermediateDirectories: true) }
+    for (file, size) in files {
+        let url = root.appendingPathComponent(file)
+        try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(repeating: 120, count: size).write(to: url)
+    }
+    return root.standardizedFileURL.path
+}
 
-// Archive round trip
+func scanStore(_ root: String, settings: Preferences? = nil) throws -> IndexStore {
+    var prefs = settings ?? Preferences.default()
+    if settings == nil { prefs.dataDirectory = root + "/.quoll-data" }
+    let snapshot = FileManager.default.temporaryDirectory.appendingPathComponent("qs-" + UUID().uuidString).path
+    _ = try IndexStore.scan(roots: [root], rules: prefs.excludeRules, into: snapshot, meta: SnapshotMeta())
+    let store = IndexStore()
+    try store.write { try store.adopt(directory: snapshot) }
+    return store
+}
+
+func allPaths(_ store: IndexStore) -> Set<String> {
+    store.read { Set((0..<store.count).filter { !store.isDead($0) }.map { store.path($0) }) }
+}
+
+func setModified(_ path: String, _ seconds: TimeInterval) throws {
+    try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: seconds)], ofItemAtPath: path)
+}
+
+let engine = QueryEngine()
+func names(_ query: String, _ store: IndexStore, sort: SortKey = .name, ascending: Bool = true, limit: Int = 100) -> [String] {
+    engine.search(QueryOptions(query: query, limit: limit, sort: sort, ascending: ascending), in: store).results.map(\.name)
+}
+
+// Search engine basics
 do {
-    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-    defer { try? FileManager.default.removeItem(at: directory) }
-
-    let catalog = Catalog()
-    catalog.replaceAll(with: [entry("/tmp/a.txt")], roots: ["/tmp"])
-    let url = directory.appendingPathComponent("catalog.json")
-    try catalog.save(to: url)
-
-    let loaded = Catalog()
-    try loaded.load(from: url)
-    expect(loaded.count == 1, "archive count")
-    expect(loaded.entry(at: "/tmp/a.txt")?.name == "a.txt", "archive entry")
+    let root = try makeTree(["b.txt": 2, "a.txt": 1, "Notes.md": 5])
+    defer { try? FileManager.default.removeItem(atPath: root) }
+    try setModified(root + "/a.txt", 1_000_000)
+    try setModified(root + "/b.txt", 2_000_000)
+    let store = try scanStore(root)
+    let page = engine.search(QueryOptions(query: "ending:txt", limit: 1, sort: .name, ascending: true), in: store)
+    expect(page.total == 2, "search total")
+    expect(page.count == 1, "search limit")
+    expect(page.results.first?.name == "a.txt", "search sort")
+    expect(page.truncated, "search truncated flag")
+    expect(names("", store, sort: .modified, ascending: false).first == "Notes.md", "newest first")
+    expect(names("ending:txt", store, sort: .modified, ascending: false) == ["b.txt", "a.txt"], "sort by modified")
+    expect(names("notes", store) == ["Notes.md"], "fast path substring")
+    expect(names("matchcase:notes", store).isEmpty && names("matchcase:Notes", store) == ["Notes.md"], "matchcase")
 } catch {
-    expect(false, "archive round trip: \(error)")
+    expect(false, "search fixture: \(error)")
+}
+
+// Folding: Turkish dotted/dotless i and diacritics, both directions
+do {
+    let root = try makeTree(["ırmak.txt": 1, "İSTANBUL.pdf": 1, "Café.md": 1, "plain.txt": 1])
+    defer { try? FileManager.default.removeItem(atPath: root) }
+    let store = try scanStore(root)
+    expect(names("irmak", store) == ["ırmak.txt"], "fold: irmak finds ırmak")
+    expect(names("istanbul", store) == ["İSTANBUL.pdf"], "fold: istanbul finds İSTANBUL")
+    expect(names("IRMAK", store) == ["ırmak.txt"], "fold: upper-case query")
+    expect(names("cafe", store) == ["Café.md"], "fold: diacritic")
+    expect(names("caf*", store) == ["Café.md"], "fold: wildcard")
+} catch {
+    expect(false, "fold fixture: \(error)")
+}
+
+// Snapshot round trip, resolve, children order
+do {
+    let root = try makeTree(["sub/c.txt": 1, "a.txt": 1, "b.md": 1])
+    defer { try? FileManager.default.removeItem(atPath: root) }
+    let store = try scanStore(root)
+    let dir = store.snapshotDirectory!
+    let again = IndexStore()
+    try again.write { try again.adopt(directory: dir) }
+    expect(allPaths(again) == allPaths(store), "snapshot round trip")
+    expect(again.read { again.resolve(root + "/sub/c.txt").map { again.path($0) } } == root + "/sub/c.txt", "resolve path")
+    expect(again.read { again.liveFiles } == 3 && again.read { again.liveFolders } == 2, "live counters")
+} catch {
+    expect(false, "snapshot fixture: \(error)")
 }
 
 // Scanner and excludes
 do {
-    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-    try FileManager.default.createDirectory(at: root.appendingPathComponent("sub"), withIntermediateDirectories: true)
-    try Data("a".utf8).write(to: root.appendingPathComponent("a.txt"))
-    try Data("b".utf8).write(to: root.appendingPathComponent("b.md"))
-    try Data("c".utf8).write(to: root.appendingPathComponent("sub/c.txt"))
-    defer { try? FileManager.default.removeItem(at: root) }
-
-    let result = Scanner().scan(
-        roots: [root.path],
-        options: Scanner.Options(excludes: ["*.md"])
-    )
-    let names = Set(result.entries.map(\.name))
-    expect(names.contains("a.txt"), "scanner file")
-    expect(names.contains("c.txt"), "scanner nested file")
-    expect(names.contains("sub"), "scanner directory")
-    expect(!names.contains("b.md"), "scanner exclude")
+    let root = try makeTree(["a.txt": 1, "b.md": 1, "sub/c.txt": 1])
+    defer { try? FileManager.default.removeItem(atPath: root) }
+    var settings = Preferences.default()
+    settings.dataDirectory = root + "/.quoll-data"
+    settings.excludes = ["*.md"]
+    let paths = allPaths(try scanStore(root, settings: settings))
+    expect(paths.contains(root + "/a.txt"), "scanner file")
+    expect(paths.contains(root + "/sub/c.txt"), "scanner nested file")
+    expect(paths.contains(root + "/sub"), "scanner directory")
+    expect(!paths.contains(root + "/b.md"), "scanner exclude")
 } catch {
     expect(false, "scanner fixture: \(error)")
 }
 
 // Excludes: name rules prune whole subtrees, includes override, data dir is hard
 do {
-    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-    let fm = FileManager.default
-    for dir in ["node_modules/a", "keep/node_modules/x", "cache/inner/deep", "data"] {
-        try fm.createDirectory(at: root.appendingPathComponent(dir), withIntermediateDirectories: true)
-    }
-    for file in ["node_modules/a/b.js", "keep/node_modules/x/y.js", "cache/inner/deep/z.txt",
-                 "cache/other.txt", "data/catalog.json", "top.txt"] {
-        try Data("x".utf8).write(to: root.appendingPathComponent(file))
-    }
-    defer { try? fm.removeItem(at: root) }
-    let base = root.standardizedFileURL.path
-
+    let base = try makeTree(["node_modules/a/b.js": 1, "keep/node_modules/x/y.js": 1, "cache/inner/deep/z.txt": 1,
+                             "cache/other.txt": 1, "data/catalog.json": 1, "top.txt": 1])
+    defer { try? FileManager.default.removeItem(atPath: base) }
     var settings = Preferences.default()
     settings.dataDirectory = base + "/data"
     settings.excludes = [base + "/cache"]
-    let paths = Set(Scanner().scan(roots: [base], options: Scanner.Options(rules: settings.excludeRules))
-        .entries.map(\.path))
+    let paths = allPaths(try scanStore(base, settings: settings))
     expect(paths.contains(base + "/top.txt"), "exclude: normal file kept")
     expect(!paths.contains(base + "/node_modules"), "exclude: default name rule")
     expect(!paths.contains(base + "/node_modules/a/b.js"), "exclude: subtree of name rule")
@@ -155,8 +197,7 @@ do {
     expect(!paths.contains(base + "/data/catalog.json"), "exclude: data directory is hard-excluded")
 
     settings.includes = ["node_modules", base + "/cache/inner", base + "/data"]
-    let included = Set(Scanner().scan(roots: [base], options: Scanner.Options(rules: settings.excludeRules))
-        .entries.map(\.path))
+    let included = allPaths(try scanStore(base, settings: settings))
     expect(included.contains(base + "/node_modules/a/b.js"), "include: name overrides default exclude")
     expect(included.contains(base + "/cache/inner/deep/z.txt"), "include: path under an excluded folder")
     expect(included.contains(base + "/cache"), "include: excluded parent is passed through")
@@ -171,6 +212,62 @@ do {
     expect(false, "exclude fixture: \(error)")
 }
 
+// Overlay: subtree delete and rename cost, compaction keeps the live view
+do {
+    let root = try makeTree(["big/.keep": 1, "other/file.txt": 1])
+    defer { try? FileManager.default.removeItem(atPath: root) }
+    let store = try scanStore(root)
+    let big = store.read { store.resolve(root + "/big")! }
+    let other = store.read { store.resolve(root + "/other")! }
+    store.write {
+        for i in 0..<100_000 {
+            let raw = Array("f\(i).txt".utf8)
+            raw.withUnsafeBufferPointer { r in
+                store.appendDelta(parent: big, raw: r, folded: r, flags: 0, meta: EntryMeta(mtime: 1, ctime: 1, size: 1), inode: 0)
+            }
+        }
+    }
+    expect(engine.search(QueryOptions(query: "f9999", limit: 5), in: store).total == 11, "overlay entries searchable")
+
+    let renameStart = Date()
+    store.write {
+        let raw = Array("renamed".utf8)
+        raw.withUnsafeBufferPointer { store.move(big, to: other, raw: $0, folded: $0) }
+    }
+    let renameMS = Date().timeIntervalSince(renameStart) * 1000
+    expect(store.read { store.resolve(root + "/other/renamed/f42.txt") } != nil, "move keeps subtree reachable")
+    expect(renameMS < 5, "move is O(1) (\(String(format: "%.3f", renameMS)) ms)")
+
+    let snapshot = FileManager.default.temporaryDirectory.appendingPathComponent("qc-" + UUID().uuidString).path
+    let before = allPaths(store)
+    try store.read { try store.writeSnapshot(to: snapshot, meta: store.meta) }
+    try store.write { try store.adopt(directory: snapshot) }
+    expect(allPaths(store) == before, "compaction preserves the live tree")
+    expect(store.read { store.pendingChanges } == 0, "compaction clears the overlay")
+
+    let renamed = store.read { store.resolve(root + "/other/renamed")! }
+    let deleteStart = Date()
+    store.write { store.removeSubtree(renamed) }
+    let deleteMS = Date().timeIntervalSince(deleteStart) * 1000
+    expect(store.read { store.resolve(root + "/other/renamed/f1.txt") } == nil, "subtree delete")
+    expect(deleteMS < 50, "100k-entry subtree delete (\(String(format: "%.1f", deleteMS)) ms)")
+} catch {
+    expect(false, "overlay fixture: \(error)")
+}
+
+// under:/parent: take folder names or absolute paths
+do {
+    let root = try makeTree(["src/a.swift": 1, "proj/src/b.swift": 1, "proj/docs/c.md": 1])
+    defer { try? FileManager.default.removeItem(atPath: root) }
+    let store = try scanStore(root)
+    expect(Set(names("under:src ending:swift", store)) == ["a.swift", "b.swift"], "under: folder name")
+    expect(names("under:\(root)/proj ending:swift", store) == ["b.swift"], "under: absolute path")
+    expect(Set(names("parent:src", store)) == ["a.swift", "b.swift"], "parent: folder name")
+    expect(Set(names("path:proj/docs", store)) == ["c.md", "docs"], "path: fragment across folders")
+} catch {
+    expect(false, "under fixture: \(error)")
+}
+
 // Old settings files (no includes/useDefaultExcludes keys) still decode
 do {
     let json = #"{"roots":["/tmp"],"excludes":[],"dataDirectory":"/tmp/q","controlPath":"/tmp/q/s","http":{"enabled":false,"port":8484,"username":"","password":""},"defaultLimit":100,"skipHidden":false,"skipPackages":false,"followSymlinks":false}"#
@@ -182,25 +279,21 @@ do {
 
 // IPC round trip
 do {
+    let root = try makeTree(["control.txt": 1])
+    defer { try? FileManager.default.removeItem(atPath: root) }
+    let controlStore = try scanStore(root)
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: directory) }
     let socket = directory.appendingPathComponent("test.sock").path
 
-    let controlStore = Catalog()
-    controlStore.replaceAll(with: [entry("/tmp/control.txt")], roots: ["/tmp"])
     let server = ControlServer(controlPath: socket) { request in
         if request.command == "search" {
-            let response = QueryEngine().search(
+            let response = engine.search(
                 QueryOptions(query: request.query ?? "", limit: 10, sort: .name, ascending: true),
                 in: controlStore
             )
-            return ControlReply(
-                id: request.id,
-                count: response.count,
-                total: response.total,
-                results: response.results
-            )
+            return ControlReply(id: request.id, count: response.count, total: response.total, results: response.results)
         }
         return ControlReply(id: request.id, message: "pong")
     }

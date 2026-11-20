@@ -79,7 +79,7 @@ final class AppModel: ObservableObject {
             self?.performSearch()
         }
         searchWorkItem = item
-        queue.asyncAfter(deadline: .now() + 0.15, execute: item)
+        queue.asyncAfter(deadline: .now() + 0.03, execute: item)
     }
 
     func performSearch() {
@@ -111,8 +111,10 @@ final class AppModel: ObservableObject {
         guard let service else { return }
         let response = service.engine.search(
             QueryOptions(query: query, limit: 500, sort: .name, ascending: true),
-            in: service.catalog
+            in: service.store,
+            cancellable: true
         )
+        if response.warnings.contains("cancelled") { return }
         DispatchQueue.main.async {
             self.results = response.results
             self.total = response.total

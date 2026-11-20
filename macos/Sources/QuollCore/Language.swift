@@ -283,9 +283,10 @@ public enum SearchParser {
             case .path:
                 term.pathFragment = value
             case .under:
-                term.under = Self.standardize(value)
+                // `/abs` or `~/x` is a folder path; a bare value is a folder name.
+                term.under = Self.isAbsolute(value) ? Self.standardize(value) : value
             case .parent:
-                term.parentPath = Self.standardize(value)
+                term.parentPath = Self.isAbsolute(value) ? Self.standardize(value) : value
             case .bytes:
                 term.bytes = Self.parseNumeric(value)
             case .changed:
@@ -332,8 +333,11 @@ public enum SearchParser {
         }
 
         static func standardize(_ path: String) -> String {
-            let expanded = (path as NSString).expandingTildeInPath
-            return URL(fileURLWithPath: expanded).standardizedFileURL.path
+            Scanner.standardize(path)
+        }
+
+        static func isAbsolute(_ value: String) -> Bool {
+            value.hasPrefix("/") || value.hasPrefix("~")
         }
 
         static func parseNumeric(_ raw: String) -> NumberRule? {
@@ -650,12 +654,24 @@ public final class Matcher {
         }
 
         if let prefix = term.under {
-            if !(entry.path == prefix || entry.path.hasPrefix(prefix + "/")) { return false }
+            if prefix.hasPrefix("/") {
+                if !(entry.path == prefix || entry.path.hasPrefix(prefix + "/")) { return false }
+            } else {
+                // Folder name anywhere above the entry (or the entry itself, if a folder).
+                let key = Fold.fold(prefix)
+                var components = entry.path.split(separator: "/").map(String.init)
+                if !entry.isDirectory { components.removeLast() }
+                if !components.contains(where: { Fold.fold($0) == key }) { return false }
+            }
         }
 
         if let parent = term.parentPath {
             let actual = (entry.path as NSString).deletingLastPathComponent
-            if actual != parent { return false }
+            if parent.hasPrefix("/") {
+                if actual != parent { return false }
+            } else if Fold.fold((actual as NSString).lastPathComponent) != Fold.fold(parent) {
+                return false
+            }
         }
 
         if let size = term.bytes, !size.matches(entry.size) { return false }

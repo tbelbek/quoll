@@ -157,13 +157,8 @@ private func commandSearch(_ arguments: [String], settings: Preferences) {
         }
     }
 
-    let catalog = Catalog()
-    do {
-        try catalog.load(from: settings.catalogURL)
-    } catch {
-        fail("no index at \(settings.catalogURL.path); run `quoll scan <paths>` first")
-    }
-    let response = QueryEngine().search(options, in: catalog)
+    let store = loadStore(settings)
+    let response = QueryEngine().search(options, in: store)
     if has("--json", in: arguments) {
         printJSON(response)
     } else {
@@ -192,38 +187,40 @@ private func commandScan(_ arguments: [String], settings: Preferences) {
         }
     }
 
-    let scanner = Scanner()
-    let result = scanner.scan(
-        roots: roots,
-        options: Scanner.Options(
-            rules: effective.excludeRules,
-            skipHidden: settings.skipHidden,
-            skipPackages: settings.skipPackages,
-            followSymlinks: settings.followSymlinks
-        ),
-        progress: { count in
-            if count % 20_000 == 0 {
-                printError("scanned \(count) entries...")
-            }
-        }
-    )
-
-    let catalog = Catalog()
-    catalog.replaceAll(with: result.entries, roots: roots)
     var updated = settings
     updated.roots = roots
     if !excludes.isEmpty { updated.excludes = excludes }
+    let directory = SnapshotLocation.fresh(in: updated.dataDirectory)
+    var meta = SnapshotMeta()
+    meta.eventId = ChangeWatcher.currentEventId
+    meta.rulesFingerprint = (updated.roots + [updated.excludeRules.fingerprint]).joined(separator: "\u{1d}")
+    meta.devices = roots.map(ChangeWatcher.volumeUUID(for:))
     do {
+        try updated.ensureDirectories()
         try updated.save()
-        try catalog.save(to: updated.catalogURL)
+        let stats = try IndexStore.scan(roots: roots, rules: effective.excludeRules, into: directory, meta: meta)
+        try SnapshotLocation.publish(directory, in: updated.dataDirectory)
+        print("scanned \(stats.entries) entries in \(String(format: "%.1f", stats.duration))s")
+        if stats.unreadable > 0 {
+            printError("\(stats.unreadable) folders could not be read")
+        }
     } catch {
-        fail("unable to save index: \(error.localizedDescription)")
+        fail("unable to save index: \(error)")
     }
+}
 
-    print("scanned \(result.entries.count) entries in \(String(format: "%.1f", result.duration))s")
-    if !result.errors.isEmpty {
-        printError("\(result.errors.count) paths could not be read")
+/// Maps the current snapshot read-only (no service running).
+private func loadStore(_ settings: Preferences) -> IndexStore {
+    let store = IndexStore()
+    guard let directory = SnapshotLocation.current(in: settings.dataDirectory) else {
+        fail("no index in \(settings.dataDirectory); run `quoll scan <paths>` first")
     }
+    do {
+        try store.write { try store.adopt(directory: directory) }
+    } catch {
+        fail("index unreadable (\(error)); run `quoll scan` again")
+    }
+    return store
 }
 
 private func commandStatus(_ arguments: [String], settings: Preferences) {
@@ -247,14 +244,15 @@ private func commandStatus(_ arguments: [String], settings: Preferences) {
         }
     }
 
-    let catalog = Catalog()
-    try? catalog.load(from: settings.catalogURL)
+    let store = IndexStore()
+    let directory = SnapshotLocation.current(in: settings.dataDirectory)
+    if let directory { try? store.write { try store.adopt(directory: directory) } }
     let status = CatalogStatus(
-        files: catalog.fileTotal,
-        directories: catalog.folderTotal,
+        files: store.liveFiles,
+        directories: store.liveFolders,
         roots: settings.roots,
-        lastScan: catalog.lastScan,
-        catalogBytes: (try? FileManager.default.attributesOfItem(atPath: settings.catalogURL.path)[.size] as? NSNumber)?.int64Value ?? 0,
+        lastScan: directory == nil ? nil : store.meta.written,
+        catalogBytes: SnapshotLocation.bytes(of: directory),
         controlPath: settings.controlPath,
         uptime: 0
     )
@@ -323,15 +321,10 @@ private func commandExport(_ arguments: [String], settings: Preferences) {
 }
 
 private func exportLocally(query: String, format: ReportFormat, settings: Preferences) -> Data {
-    let catalog = Catalog()
-    do {
-        try catalog.load(from: settings.catalogURL)
-    } catch {
-        fail("no index at \(settings.catalogURL.path); run `quoll scan <paths>` first")
-    }
+    let store = loadStore(settings)
     let response = QueryEngine().search(
         QueryOptions(query: query, limit: 0, sort: .path, ascending: true),
-        in: catalog
+        in: store
     )
     return ReportWriter.export(response.results, format: format)
 }

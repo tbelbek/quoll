@@ -86,13 +86,35 @@ public struct ExcludeRules: Sendable {
 
     /// Verdict for one entry met during a walk. `inheritedExclusion` is true for
     /// children of a `.passThrough` directory.
-    public func verdict(name: String, path: String, isDirectory: Bool, inheritedExclusion: Bool = false) -> Verdict {
-        if hard.matchesPath(path) { return .skip }
-        if includes.matchesName(name) || includes.matchesPath(path) { return .keep }
-        let excluded = inheritedExclusion || excludes.matchesName(name) || excludes.matchesPath(path)
+    ///
+    /// `checkPaths: false` skips every path rule; pass it only when
+    /// `needsPaths(below:)` is false for the entry's folder.
+    public func verdict(name: String, path: String, isDirectory: Bool, inheritedExclusion: Bool = false,
+                        checkPaths: Bool = true) -> Verdict {
+        if checkPaths && hard.matchesPath(path) { return .skip }
+        if includes.matchesName(name) || (checkPaths && includes.matchesPath(path)) { return .keep }
+        let excluded = inheritedExclusion || excludes.matchesName(name) || (checkPaths && excludes.matchesPath(path))
         if !excluded { return .keep }
-        if isDirectory && leadsToInclude(path) { return .passThrough }
+        if checkPaths && isDirectory && leadsToInclude(path) { return .passThrough }
         return .skip
+    }
+
+    /// Can any path rule match an entry directly inside `folder`? When false the
+    /// walker skips building per-entry path strings.
+    public func needsPaths(below folder: String) -> Bool {
+        if !excludes.pathGlobs.isEmpty || !includes.pathGlobs.isEmpty || !hard.pathGlobs.isEmpty { return true }
+        let prefix = folder == "/" ? "/" : folder + "/"
+        return excludes.paths.contains { $0.hasPrefix(prefix) }
+            || includes.paths.contains { $0.hasPrefix(prefix) }
+            || hard.paths.contains { $0.hasPrefix(prefix) }
+    }
+
+    /// Stable text form, stored in the snapshot to detect rule changes.
+    public var fingerprint: String {
+        func f(_ r: RuleSet) -> String {
+            (r.names.sorted() + r.nameGlobs + r.paths + r.pathGlobs).joined(separator: "\u{1f}")
+        }
+        return [f(excludes), f(includes), f(hard)].joined(separator: "\u{1e}")
     }
 
     /// Convenience for callers that only need yes/no (files, or a walk without includes).

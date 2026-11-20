@@ -15,7 +15,10 @@ let package = Package(
     targets: [
         .target(
             name: "QuollCore",
-            path: "Sources/QuollCore"
+            path: "Sources/QuollCore",
+            // D7 in docs/DECISIONS.md: per-entry loops read class storage; dynamic
+            // exclusivity checks were a measurable share of a 2.3M-entry scan.
+            swiftSettings: [.unsafeFlags(["-enforce-exclusivity=unchecked"])]
         ),
         .executableTarget(
             name: "quoll",
