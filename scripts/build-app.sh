@@ -18,8 +18,10 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 cp "$BIN_DIR/QuollApp" "$APP/Contents/MacOS/Quoll"
-cp "$BIN_DIR/quoll" "$APP/Contents/MacOS/quoll"   # CLI ships inside the bundle
-chmod +x "$APP/Contents/MacOS/Quoll" "$APP/Contents/MacOS/quoll"
+# The CLI ships inside the bundle. Not as MacOS/quoll: APFS is case-insensitive by
+# default, so that name would overwrite the app's own MacOS/Quoll executable.
+cp "$BIN_DIR/quoll" "$APP/Contents/MacOS/quoll-cli"
+chmod +x "$APP/Contents/MacOS/Quoll" "$APP/Contents/MacOS/quoll-cli"
 cp "$ROOT/resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"   # resources/make-icon.sh
 
 cat > "$APP/Contents/Info.plist" <<PLIST
@@ -63,11 +65,11 @@ IDENTITY="${QUOLL_SIGNING_IDENTITY:-Quoll Local Signing}"
 if security find-identity -v -p codesigning | grep -q "\"$IDENTITY\""; then
     EXTRA=()
     case "$IDENTITY" in "Developer ID Application"*) EXTRA=(--options runtime --timestamp) ;; esac
-    codesign --force ${EXTRA[@]+"${EXTRA[@]}"} --sign "$IDENTITY" --identifier com.quoll.search "$APP/Contents/MacOS/quoll"
+    codesign --force ${EXTRA[@]+"${EXTRA[@]}"} --sign "$IDENTITY" --identifier com.quoll.search "$APP/Contents/MacOS/quoll-cli"
     codesign --force ${EXTRA[@]+"${EXTRA[@]}"} --sign "$IDENTITY" --identifier com.quoll.search "$APP"
 else
     echo "note: no '$IDENTITY' identity; signing ad hoc (privacy grants reset on rebuild)"
-    codesign --force --sign - "$APP/Contents/MacOS/quoll" >/dev/null 2>&1 || true
+    codesign --force --sign - "$APP/Contents/MacOS/quoll-cli" >/dev/null 2>&1 || true
     codesign --force --sign - "$APP" >/dev/null 2>&1 || true
 fi
 echo "built $APP"

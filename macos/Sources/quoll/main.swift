@@ -436,6 +436,10 @@ private func commandSettings(_ arguments: [String], settings: Preferences) {
         updated.includes.removeAll { $0 == include }
         changed = true
     }
+    if let hotkey = value(for: "--hotkey", in: arguments) {
+        updated.hotkey = hotkey
+        changed = true
+    }
     if has("--no-default-excludes", in: arguments) {
         updated.useDefaultExcludes = false
         changed = true
@@ -475,6 +479,7 @@ private func usage() {
                      [--exclude PATTERN] [--remove-exclude PATTERN] [--clear-excludes]
                      [--include PATTERN] [--remove-include PATTERN]
                      [--no-default-excludes] [--default-excludes]
+                     [--hotkey SPEC]   e.g. super+s (⌃⌥⌘S), hyper+s (⌃⌥⇧⌘S); restart the app
       quoll help
 
     GLOBAL

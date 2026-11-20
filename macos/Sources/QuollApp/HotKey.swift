@@ -48,6 +48,9 @@ final class HotKey {
             case "alt", "opt", "option": modifiers |= UInt32(optionKey); display += "⌥"
             case "shift": modifiers |= UInt32(shiftKey); display += "⇧"
             case "cmd", "command": modifiers |= UInt32(cmdKey); display += "⌘"
+            case "super":   // ⌃⌥⌘, Vorssaint's "super key" (Caps Lock)
+                modifiers |= UInt32(controlKey | optionKey | cmdKey)
+                display += "Super+"
             case "hyper":   // ⌃⌥⇧⌘, usually Caps Lock remapped
                 modifiers |= UInt32(controlKey | optionKey | shiftKey | cmdKey)
                 display += "Hyper+"

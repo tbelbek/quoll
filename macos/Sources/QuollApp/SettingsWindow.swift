@@ -47,7 +47,7 @@ final class SettingsWindow: NSWindow {
 
         let stack = NSStackView(views: [
             label("Global hotkey"), hotkeyField,
-            hint("e.g. hyper+s (⌃⌥⇧⌘S), control+option+space, cmd+shift+f"), hotkeyNote,
+            hint("e.g. super+s (⌃⌥⌘S), hyper+s (⌃⌥⇧⌘S), control+option+space, cmd+shift+f"), hotkeyNote,
             label("Folders to index (one per line)"), roots.scroll,
             label("Exclude (one per line)"), excludes.scroll,
             hint("A name (node_modules, *.tmp) matches at any depth; a path (~/Downloads/old) excludes that folder."),

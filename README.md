@@ -45,7 +45,7 @@ xattr -dr com.apple.quarantine /Applications/Quoll.app
 2. Grant **Full Disk Access** (System Settings › Privacy & Security › Full Disk
    Access › add Quoll), otherwise macOS asks folder by folder and the first scan
    waits for each answer.
-3. Press the hotkey: **Hyper+S** (⌃⌥⇧⌘S) by default — change it in Settings (⌘,),
+3. Press the hotkey: **Hyper+S** (⌃⌥⇧⌘S) by default. With a tool that maps Caps Lock to ⌃⌥⌘ (a "super key", e.g. Vorssaint) use `super+s`. Change it in Settings (⌘,) or `quoll settings --hotkey super+s`,
    e.g. `control+option+space` or `cmd+shift+f`.
 
 **Window.** Type to search; ↑/↓ select, Enter opens, ⌘Enter reveals in Finder,
@@ -95,7 +95,7 @@ swift run quoll serve --http --port 8484
 curl 'http://127.0.0.1:8484/search?q=ending:swift&json=1'
 ```
 
-The CLI also ships inside the app: `/Applications/Quoll.app/Contents/MacOS/quoll`.
+The CLI also ships inside the app: `/Applications/Quoll.app/Contents/MacOS/quoll-cli` (link it into your PATH as `quoll`).
 
 ## Query language
 
