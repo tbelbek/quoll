@@ -7,9 +7,9 @@ cd "$ROOT/macos"
 # QUOLL_UNIVERSAL=1 builds arm64 + x86_64 (release builds); default is the host arch.
 ARCHS=()
 if [ "${QUOLL_UNIVERSAL:-0}" = "1" ]; then ARCHS=(--arch arm64 --arch x86_64); fi
-swift build -c release "${ARCHS[@]}" --product QuollApp
-swift build -c release "${ARCHS[@]}" --product quoll
-BIN_DIR="$(swift build -c release "${ARCHS[@]}" --show-bin-path)"
+swift build -c release ${ARCHS[@]+"${ARCHS[@]}"} --product QuollApp
+swift build -c release ${ARCHS[@]+"${ARCHS[@]}"} --product quoll
+BIN_DIR="$(swift build -c release ${ARCHS[@]+"${ARCHS[@]}"} --show-bin-path)"
 VERSION="$(cat "$ROOT/VERSION" 2>/dev/null || echo 0.0.0)"
 BUILD="$(git -C "$ROOT" rev-list --count HEAD 2>/dev/null || echo 1)"
 
@@ -60,8 +60,8 @@ IDENTITY="${QUOLL_SIGNING_IDENTITY:-Quoll Local Signing}"
 if security find-identity -v -p codesigning | grep -q "\"$IDENTITY\""; then
     EXTRA=()
     case "$IDENTITY" in "Developer ID Application"*) EXTRA=(--options runtime --timestamp) ;; esac
-    codesign --force "${EXTRA[@]}" --sign "$IDENTITY" --identifier com.quoll.search "$APP/Contents/MacOS/quoll"
-    codesign --force "${EXTRA[@]}" --sign "$IDENTITY" --identifier com.quoll.search "$APP"
+    codesign --force ${EXTRA[@]+"${EXTRA[@]}"} --sign "$IDENTITY" --identifier com.quoll.search "$APP/Contents/MacOS/quoll"
+    codesign --force ${EXTRA[@]+"${EXTRA[@]}"} --sign "$IDENTITY" --identifier com.quoll.search "$APP"
 else
     echo "note: no '$IDENTITY' identity; signing ad hoc (privacy grants reset on rebuild)"
     codesign --force --sign - "$APP/Contents/MacOS/quoll" >/dev/null 2>&1 || true
