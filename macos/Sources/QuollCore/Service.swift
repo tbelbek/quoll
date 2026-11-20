@@ -38,6 +38,14 @@ public final class QuollService {
         if performInitialScan && catalog.count == 0 {
             let result = rebuild()
             log("initial scan: \(result.entries.count) entries in \(String(format: "%.1f", result.duration))s")
+        } else if catalog.count > 0 {
+            // shortcut: changes made while the service was down are only caught by a
+            // full background rescan; M4 replaces this with FSEvents replay.
+            DispatchQueue.global(qos: .utility).async { [weak self] in
+                guard let self else { return }
+                let result = self.rebuild()
+                self.log("startup rescan: \(result.entries.count) entries in \(String(format: "%.1f", result.duration))s")
+            }
         }
 
         let server = ControlServer(controlPath: settings.controlPath) { [weak self] request in
@@ -124,11 +132,23 @@ public final class QuollService {
     private func applyChanges(_ paths: [String]) {
         stateQueue.async { [weak self] in
             guard let self else { return }
+            let rules = self.settings.excludeRules
+            var changed = false
             for path in paths {
                 let normalized = Scanner.standardize(path)
+                if rules.excludesAnyComponent(of: normalized) {
+                    if self.catalog.entry(at: normalized) != nil {
+                        self.catalog.removeBranch(path: normalized)
+                        changed = true
+                    }
+                    continue
+                }
 
                 guard FileManager.default.fileExists(atPath: normalized) else {
-                    self.catalog.removeBranch(path: normalized)
+                    if self.catalog.entry(at: normalized) != nil {
+                        self.catalog.removeBranch(path: normalized)
+                        changed = true
+                    }
                     continue
                 }
 
@@ -145,18 +165,20 @@ public final class QuollService {
                     )
                     var entries = result.entries
                     if let rootRecord = try? FileEntry(url: URL(fileURLWithPath: normalized)) {
-                        if !Scanner.isExcluded(rootRecord, excludes: self.settings.excludes) {
-                            entries.append(rootRecord)
-                        }
+                        entries.append(rootRecord)
                     }
                     self.catalog.removeBranch(path: normalized)
                     self.catalog.insert(contentsOf: entries)
-                } else if let entry = try? FileEntry(url: URL(fileURLWithPath: normalized)) {
-                    if !Scanner.isExcluded(entry, excludes: self.settings.excludes) {
-                        self.catalog.put(entry)
-                    }
+                    changed = true
+                } else if let entry = try? FileEntry(url: URL(fileURLWithPath: normalized)),
+                          entry != self.catalog.entry(at: normalized) {
+                    self.catalog.put(entry)
+                    changed = true
                 }
             }
+            // Persist only real changes: an unconditional save re-triggered the
+            // watcher and rewrote the catalog every ~2 s.
+            guard changed else { return }
             self.catalog.markScanned()
             self.scheduleSave()
         }
@@ -164,7 +186,7 @@ public final class QuollService {
 
     private var scanOptions: Scanner.Options {
         Scanner.Options(
-            excludes: settings.excludes,
+            rules: settings.excludeRules,
             skipHidden: settings.skipHidden,
             skipPackages: settings.skipPackages,
             followSymlinks: settings.followSymlinks

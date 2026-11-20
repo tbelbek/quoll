@@ -128,6 +128,58 @@ do {
     expect(false, "scanner fixture: \(error)")
 }
 
+// Excludes: name rules prune whole subtrees, includes override, data dir is hard
+do {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    let fm = FileManager.default
+    for dir in ["node_modules/a", "keep/node_modules/x", "cache/inner/deep", "data"] {
+        try fm.createDirectory(at: root.appendingPathComponent(dir), withIntermediateDirectories: true)
+    }
+    for file in ["node_modules/a/b.js", "keep/node_modules/x/y.js", "cache/inner/deep/z.txt",
+                 "cache/other.txt", "data/catalog.json", "top.txt"] {
+        try Data("x".utf8).write(to: root.appendingPathComponent(file))
+    }
+    defer { try? fm.removeItem(at: root) }
+    let base = root.standardizedFileURL.path
+
+    var settings = Preferences.default()
+    settings.dataDirectory = base + "/data"
+    settings.excludes = [base + "/cache"]
+    let paths = Set(Scanner().scan(roots: [base], options: Scanner.Options(rules: settings.excludeRules))
+        .entries.map(\.path))
+    expect(paths.contains(base + "/top.txt"), "exclude: normal file kept")
+    expect(!paths.contains(base + "/node_modules"), "exclude: default name rule")
+    expect(!paths.contains(base + "/node_modules/a/b.js"), "exclude: subtree of name rule")
+    expect(!paths.contains(base + "/keep/node_modules/x/y.js"), "exclude: name rule matches at any depth")
+    expect(!paths.contains(base + "/cache/other.txt"), "exclude: path rule")
+    expect(!paths.contains(base + "/data/catalog.json"), "exclude: data directory is hard-excluded")
+
+    settings.includes = ["node_modules", base + "/cache/inner", base + "/data"]
+    let included = Set(Scanner().scan(roots: [base], options: Scanner.Options(rules: settings.excludeRules))
+        .entries.map(\.path))
+    expect(included.contains(base + "/node_modules/a/b.js"), "include: name overrides default exclude")
+    expect(included.contains(base + "/cache/inner/deep/z.txt"), "include: path under an excluded folder")
+    expect(included.contains(base + "/cache"), "include: excluded parent is passed through")
+    expect(!included.contains(base + "/cache/other.txt"), "include: siblings stay excluded")
+    expect(!included.contains(base + "/data/catalog.json"), "include: cannot override the data directory")
+
+    let rules = settings.excludeRules
+    expect(!rules.excludesAnyComponent(of: base + "/cache/inner/deep/z.txt"), "watcher: include honoured")
+    expect(rules.excludesAnyComponent(of: base + "/cache/other.txt"), "watcher: exclude honoured")
+    expect(rules.excludesAnyComponent(of: base + "/data/catalog.json"), "watcher: data directory")
+} catch {
+    expect(false, "exclude fixture: \(error)")
+}
+
+// Old settings files (no includes/useDefaultExcludes keys) still decode
+do {
+    let json = #"{"roots":["/tmp"],"excludes":[],"dataDirectory":"/tmp/q","controlPath":"/tmp/q/s","http":{"enabled":false,"port":8484,"username":"","password":""},"defaultLimit":100,"skipHidden":false,"skipPackages":false,"followSymlinks":false}"#
+    let decoded = try JSONDecoder().decode(Preferences.self, from: Data(json.utf8))
+    expect(decoded.useDefaultExcludes && decoded.includes.isEmpty, "settings: tolerant decoding")
+} catch {
+    expect(false, "settings decode: \(error)")
+}
+
 // IPC round trip
 do {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

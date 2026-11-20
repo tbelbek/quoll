@@ -20,7 +20,6 @@ cat > "$PLIST" <<PLIST
     <array>
         <string>$BIN</string>
         <string>serve</string>
-        <string>--no-scan</string>
     </array>
     <key>RunAtLoad</key>
     <true/>

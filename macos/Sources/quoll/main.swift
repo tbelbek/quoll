@@ -111,7 +111,8 @@ private func commandSearch(_ arguments: [String], settings: Preferences) {
 
     let limit = Int(value(for: "--limit", in: arguments) ?? "") ?? settings.defaultLimit
     let offset = Int(value(for: "--offset", in: arguments) ?? "") ?? 0
-    let sort = SortKey(rawValue: value(for: "--sort", in: arguments) ?? "name") ?? .name
+    let sortName = value(for: "--sort", in: arguments) ?? "name"
+    let sort = SortKey(rawValue: sortName == "extension" ? "fileExtension" : sortName) ?? .name
     let ascending = !has("--descending", in: arguments)
 
     let options = QueryOptions(
@@ -160,7 +161,7 @@ private func commandSearch(_ arguments: [String], settings: Preferences) {
     do {
         try catalog.load(from: settings.catalogURL)
     } catch {
-        fail("no index at \(settings.catalogURL.path); run `quoll index <paths>` first")
+        fail("no index at \(settings.catalogURL.path); run `quoll scan <paths>` first")
     }
     let response = QueryEngine().search(options, in: catalog)
     if has("--json", in: arguments) {
@@ -174,6 +175,8 @@ private func commandScan(_ arguments: [String], settings: Preferences) {
     let paths = positionals(arguments, optionsWithValues: ["--exclude"])
     let roots = paths.isEmpty ? settings.roots : paths.map(Scanner.standardize)
     let excludes = settings.excludes + [value(for: "--exclude", in: arguments)].compactMap { $0 }
+    var effective = settings
+    effective.excludes = excludes
 
     if let client = client(for: settings) {
         do {
@@ -193,7 +196,7 @@ private func commandScan(_ arguments: [String], settings: Preferences) {
     let result = scanner.scan(
         roots: roots,
         options: Scanner.Options(
-            excludes: excludes,
+            rules: effective.excludeRules,
             skipHidden: settings.skipHidden,
             skipPackages: settings.skipPackages,
             followSymlinks: settings.followSymlinks
@@ -324,7 +327,7 @@ private func exportLocally(query: String, format: ReportFormat, settings: Prefer
     do {
         try catalog.load(from: settings.catalogURL)
     } catch {
-        fail("no index at \(settings.catalogURL.path); run `quoll index <paths>` first")
+        fail("no index at \(settings.catalogURL.path); run `quoll scan <paths>` first")
     }
     let response = QueryEngine().search(
         QueryOptions(query: query, limit: 0, sort: .path, ascending: true),
@@ -420,6 +423,24 @@ private func commandSettings(_ arguments: [String], settings: Preferences) {
         updated.excludes.removeAll()
         changed = true
     }
+    if let include = value(for: "--include", in: arguments) {
+        if !updated.includes.contains(include) {
+            updated.includes.append(include)
+            changed = true
+        }
+    }
+    if let include = value(for: "--remove-include", in: arguments) {
+        updated.includes.removeAll { $0 == include }
+        changed = true
+    }
+    if has("--no-default-excludes", in: arguments) {
+        updated.useDefaultExcludes = false
+        changed = true
+    }
+    if has("--default-excludes", in: arguments) {
+        updated.useDefaultExcludes = true
+        changed = true
+    }
 
     if changed {
         do {
@@ -449,6 +470,8 @@ private func usage() {
       quoll export [query] [--format json|csv|tsv] [--output FILE]
       quoll settings [--show] [--add-root PATH] [--remove-root PATH]
                      [--exclude PATTERN] [--remove-exclude PATTERN] [--clear-excludes]
+                     [--include PATTERN] [--remove-include PATTERN]
+                     [--no-default-excludes] [--default-excludes]
       quoll help
 
     GLOBAL

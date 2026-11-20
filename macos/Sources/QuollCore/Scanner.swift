@@ -24,7 +24,7 @@ public struct ScanResult: Sendable {
 
 public final class Scanner {
     public struct Options {
-        public var excludes: [String]
+        public var rules: ExcludeRules
         public var skipHidden: Bool
         public var skipPackages: Bool
         public var followSymlinks: Bool
@@ -35,7 +35,17 @@ public final class Scanner {
             skipPackages: Bool = false,
             followSymlinks: Bool = false
         ) {
-            self.excludes = excludes
+            self.init(rules: ExcludeRules(excludes), skipHidden: skipHidden,
+                      skipPackages: skipPackages, followSymlinks: followSymlinks)
+        }
+
+        public init(
+            rules: ExcludeRules,
+            skipHidden: Bool = false,
+            skipPackages: Bool = false,
+            followSymlinks: Bool = false
+        ) {
+            self.rules = rules
             self.skipHidden = skipHidden
             self.skipPackages = skipPackages
             self.followSymlinks = followSymlinks
@@ -55,7 +65,8 @@ public final class Scanner {
         var entries: [FileEntry] = []
         var errors: [ScanIssue] = []
         var seen = Set<String>()
-        let excludes = Self.normalizedExcludes(options.excludes)
+        let rules = options.rules
+        var passThrough: [String] = []
 
         var enumerationOptions: FileManager.DirectoryEnumerationOptions = []
         if options.skipHidden {
@@ -74,7 +85,7 @@ public final class Scanner {
             }
             guard isDirectory.boolValue else {
                 if let entry = try? FileEntry(url: URL(fileURLWithPath: standardizedRoot)),
-                   !Self.isExcluded(entry, excludes: excludes),
+                   !rules.excludes(name: entry.name, path: entry.path),
                    seen.insert(entry.path).inserted {
                     entries.append(entry)
                 }
@@ -110,7 +121,24 @@ public final class Scanner {
 
                 do {
                     let entry = try FileEntry(url: url)
-                    if Self.isExcluded(entry, excludes: excludes) { continue }
+                    let insidePassThrough = passThrough.contains { entry.path.hasPrefix($0) }
+                    if insidePassThrough {
+                        // Below an excluded folder that leads to an include: only the
+                        // include itself (or the way to it) survives.
+                        if rules.excludesAnyComponent(of: entry.path) {
+                            if entry.isDirectory { enumerator.skipDescendants() }
+                            continue
+                        }
+                    } else {
+                        switch rules.verdict(name: entry.name, path: entry.path, isDirectory: entry.isDirectory) {
+                        case .keep: break
+                        case .passThrough: passThrough.append(entry.path + "/")
+                        case .skip:
+                            // Prune: an excluded directory is never walked.
+                            if entry.isDirectory { enumerator.skipDescendants() }
+                            continue
+                        }
+                    }
                     if seen.insert(entry.path).inserted {
                         entries.append(entry)
                     }
@@ -133,42 +161,5 @@ public final class Scanner {
     public static func standardize(_ path: String) -> String {
         let expanded = (path as NSString).expandingTildeInPath
         return URL(fileURLWithPath: expanded).standardizedFileURL.path
-    }
-
-    private static func normalizedExcludes(_ excludes: [String]) -> [String] {
-        excludes
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-            .map { pattern in
-                if pattern.contains("*") || pattern.contains("?") || pattern.contains("[") {
-                    return (pattern as NSString).expandingTildeInPath
-                }
-                return standardize(pattern)
-            }
-    }
-
-    public static func isExcluded(_ entry: FileEntry, excludes: [String]) -> Bool {
-        guard !excludes.isEmpty else { return false }
-
-        for raw in excludes {
-            let pattern = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !pattern.isEmpty else { continue }
-
-            // A plain directory path excludes the directory and its whole subtree.
-            if !pattern.contains("*") && !pattern.contains("?") && !pattern.contains("[") {
-                if entry.path == pattern || entry.path.hasPrefix(pattern + "/") {
-                    return true
-                }
-                continue
-            }
-
-            if pattern.contains("/") {
-                if fnmatch(pattern, entry.path, 0) == 0 { return true }
-            } else {
-                if fnmatch(pattern, entry.name, 0) == 0 { return true }
-                if fnmatch("*\(pattern)*", entry.name, 0) == 0 { return true }
-            }
-        }
-        return false
     }
 }

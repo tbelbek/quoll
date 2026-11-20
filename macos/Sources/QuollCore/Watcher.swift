@@ -60,6 +60,7 @@ public final class ChangeWatcher {
                 | kFSEventStreamCreateFlagFileEvents
                 | kFSEventStreamCreateFlagWatchRoot
                 | kFSEventStreamCreateFlagNoDefer
+                | kFSEventStreamCreateFlagIgnoreSelf
         )
 
         guard let created = FSEventStreamCreate(
