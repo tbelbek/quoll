@@ -172,21 +172,27 @@ throwaway adapter.
 
 ## Later (second priority)
 
-- Native window: Name / Folder / Size / Modified columns, newest first by
-  default, click a header to sort. Enter opens, ⌘Enter reveals, ⌘C copies
-  the path.
-- Global hotkey (`RegisterEventHotKey`).
-- One process: the menu-bar app hosts the service, started at login with
-  `SMAppService`. One TCC subject.
-- Stable self-signed code signing so Full Disk Access survives rebuilds
-  (`scripts/build-app.sh:46` signs ad hoc).
-- HTTP bound to loopback only; drop Basic auth and static file serving.
-- Long-running control commands no longer hit the 10 s socket timeout
-  (`Control.swift:216-218,295-297`).
-- Reject control paths longer than `sun_path` (104 bytes) with a clear error;
-  today a long data directory fails with "File name too long".
-- App fixes: read the query on the main thread (`QuollApp.swift:86`), set
-  `client`/`service` before the first search (`QuollApp.swift:50-67`).
+Done in 0.2.0:
+
+- [x] Native window: Name / Folder / Size / Modified, newest first, header sort,
+      Enter opens, ⌘Enter reveals, ⌘C copies paths; movable, full screen, Esc hides.
+- [x] Global hotkey (`RegisterEventHotKey`), `hyper+s` default, `super+s` for
+      Caps-Lock super-key tools; settings window.
+- [x] One process: the menu-bar app hosts the service.
+- [x] Stable self-signed code signing (`scripts/make-signing-identity.sh`).
+- [x] Long-running control commands reply immediately (no 10 s timeout).
+- [x] Release tooling: universal zip, CI, tag-driven GitHub releases.
+
+Open:
+
+- [ ] Start at login (`SMAppService`): without it the hotkey is dead after a reboot.
+- [ ] Quick Look on ⌘Y.
+- [ ] HTTP bound to loopback only; drop Basic auth and static file serving.
+- [ ] Reject control paths longer than `sun_path` (104 bytes) with a clear error.
+- [ ] `changed:2025` should mean the whole year, not 1 January.
+- [ ] `path:` per-folder memo (~50 ms at 2.3M entries today).
+- [ ] Hotkey recorder in Settings; match highlighting; Created/Extension columns.
+- [ ] Developer ID signing + notarization (needs an Apple Developer account).
 
 ## Cut / defer
 

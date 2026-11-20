@@ -115,8 +115,10 @@ final class SearchController: NSViewController, NSTableViewDataSource, NSTableVi
         root.blendingMode = .behindWindow
         root.state = .active
 
-        field.placeholderString = "Search files and folders — wildcards (*.pdf), ending:, changed:, under: …"
-        field.font = .systemFont(ofSize: 17)
+        field.font = .systemFont(ofSize: 15)
+        field.placeholderAttributedString = NSAttributedString(
+            string: "Search  —  *.pdf, ending:md, changed:today, under:Repos",
+            attributes: [.font: NSFont.systemFont(ofSize: 13), .foregroundColor: NSColor.tertiaryLabelColor])
         field.focusRingType = .none
         field.sendsSearchStringImmediately = true
         field.delegate = self
