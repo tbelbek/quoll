@@ -184,8 +184,9 @@ private final class Plan {
             let hi = min(count, lo + chunkSize)
             var heap = TopK(limit: order.collectsAll ? Int.max : k, before: order.before)
             var total = 0
+            var ctx = EvalContext()
             if let driver {
-                scanArena(lo: lo, hi: hi, literal: UnsafeBufferPointer(driver)) { id in
+                scanArena(lo: lo, hi: hi, literal: UnsafeBufferPointer(driver), ctx: &ctx) { id in
                     total += 1
                     heap.insert(id)
                 }
@@ -210,7 +211,7 @@ private final class Plan {
                     heap.insert(id)
                 }
             } else {
-                for id in lo..<hi where accepts(id) && eval(rootIndex, id) {
+                for id in lo..<hi where accepts(id) && eval(rootIndex, id, &ctx) {
                     total += 1
                     heap.insert(id)
                 }
@@ -250,7 +251,8 @@ private final class Plan {
 
     /// memmem of the driver literal over the base arena chunk; only hits are
     /// evaluated. Delta and renamed entries are evaluated per entry.
-    private func scanArena(lo: Int, hi: Int, literal: UnsafeBufferPointer<UInt8>, _ hit: (Int) -> Void) {
+    private func scanArena(lo: Int, hi: Int, literal: UnsafeBufferPointer<UInt8>, ctx: inout EvalContext,
+                           _ hit: (Int) -> Void) {
         let base = store.baseCount
         if lo < base {
             let (bytes, offsets, _) = store.baseArena
@@ -268,31 +270,31 @@ private final class Plan {
                     if Int(offsets[mid]) <= offset { a = mid + 1 } else { b = mid }
                 }
                 let id = a - 1
-                if accepts(id) && !store.hasNameOverride(id) && (driverDecides || eval(rootIndex, id)) { hit(id) }
+                if accepts(id) && !store.hasNameOverride(id) && (driverDecides || eval(rootIndex, id, &ctx)) { hit(id) }
                 position = Int(offsets[id + 1])
             }
             // Renamed base entries carry their new name outside the arena.
-            for id in lo..<end where store.hasNameOverride(id) && accepts(id) && eval(rootIndex, id) { hit(id) }
+            for id in lo..<end where store.hasNameOverride(id) && accepts(id) && eval(rootIndex, id, &ctx) { hit(id) }
         }
         if hi > base {
-            for id in max(lo, base)..<hi where accepts(id) && eval(rootIndex, id) { hit(id) }
+            for id in max(lo, base)..<hi where accepts(id) && eval(rootIndex, id, &ctx) { hit(id) }
         }
     }
 
     // MARK: Evaluation
 
-    private func eval(_ index: Int, _ id: Int) -> Bool {
+    private func eval(_ index: Int, _ id: Int, _ ctx: inout EvalContext) -> Bool {
         let node = nodePtr[index]
         switch node.kind {
         case .all: return true
         case .none: return false
-        case .term: return terms[Int(node.first)].matches(id, plan: self)
-        case .not: return !eval(Int(childPtr[Int(node.first)]), id)
+        case .term: return terms[Int(node.first)].matches(id, plan: self, ctx: &ctx)
+        case .not: return !eval(Int(childPtr[Int(node.first)]), id, &ctx)
         case .and:
-            for k in Int(node.first)..<Int(node.first + node.count) where !eval(Int(childPtr[k]), id) { return false }
+            for k in Int(node.first)..<Int(node.first + node.count) where !eval(Int(childPtr[k]), id, &ctx) { return false }
             return true
         case .or:
-            for k in Int(node.first)..<Int(node.first + node.count) where eval(Int(childPtr[k]), id) { return true }
+            for k in Int(node.first)..<Int(node.first + node.count) where eval(Int(childPtr[k]), id, &ctx) { return true }
             return false
         }
     }
@@ -340,6 +342,75 @@ private final class Plan {
         var st = stat()
         guard lstat(store.path(id), &st) == 0 else { return .distantPast }
         return Date(timeIntervalSince1970: TimeInterval(st.st_atimespec.tv_sec))
+    }
+}
+
+// MARK: - Evaluation context
+
+/// Per-chunk scratch for path predicates. Children of a folder sit next to each
+/// other in id order, so the parent's path is built once per run of siblings
+/// instead of once per entry (`path:` without a name literal went 275 ms → see D14).
+private struct EvalContext {
+    var parent = Int.min
+    var parentFolded: [UInt8] = []
+    var parentRaw: [UInt8] = []
+    var haveFolded = false
+    var haveRaw = false
+    var scratch: [UInt8] = []
+    /// "Parent path contains needle", remembered for the current parent per needle.
+    var containsParent = Int.min
+    var containsNeedle: UnsafePointer<UInt8>?
+    var containsFolded = false
+    var containsResult = false
+
+    mutating func parentPath(of id: Int, folded: Bool, plan: Plan) -> [UInt8] {
+        let p = plan.store.parent(id)
+        if p != parent {
+            parent = p
+            haveFolded = false
+            haveRaw = false
+        }
+        if folded {
+            if !haveFolded { plan.pathBytes(p, folded: true, into: &parentFolded); haveFolded = true }
+            return parentFolded
+        }
+        if !haveRaw { plan.pathBytes(p, folded: false, into: &parentRaw); haveRaw = true }
+        return parentRaw
+    }
+
+    /// Full path of `id` (parent from the cache) into `scratch`.
+    mutating func fullPath(of id: Int, folded: Bool, plan: Plan) {
+        let base = parentPath(of: id, folded: folded, plan: plan)
+        scratch.removeAll(keepingCapacity: true)
+        scratch.append(contentsOf: base)
+        if scratch.last != UInt8(ascii: "/") { scratch.append(UInt8(ascii: "/")) }
+        scratch.append(contentsOf: folded ? plan.store.folded(id) : plan.store.raw(id))
+    }
+
+    /// Does the full path of `id` contain `needle`? Only the parent path and the
+    /// window across the last separator are examined.
+    mutating func pathContains(_ id: Int, _ needle: UnsafeBufferPointer<UInt8>, folded: Bool, plan: Plan) -> Bool {
+        let base = parentPath(of: id, folded: folded, plan: plan)
+        if containsParent != parent || containsNeedle != needle.baseAddress || containsFolded != folded {
+            containsParent = parent
+            containsNeedle = needle.baseAddress
+            containsFolded = folded
+            containsResult = base.withUnsafeBufferPointer { Term.contains($0, needle) }
+        }
+        if containsResult { return true }
+        // Not in the parent path: the match must lie in the name, or (if the needle
+        // has a "/") end in the name with the needle's last segment as its prefix.
+        let name = folded ? plan.store.folded(id) : plan.store.raw(id)
+        guard let slash = needle.lastIndex(of: UInt8(ascii: "/")) else { return Term.contains(name, needle) }
+        let tail = UnsafeBufferPointer(rebasing: needle[(slash + 1)...])
+        guard name.count >= tail.count,
+              IndexStore.compare(UnsafeBufferPointer(rebasing: name[0..<tail.count]), tail) == 0 else { return false }
+        scratch.removeAll(keepingCapacity: true)
+        let keep = min(base.count, max(0, needle.count - 1))
+        scratch.append(contentsOf: base[(base.count - keep)...])
+        if base.last != UInt8(ascii: "/") { scratch.append(UInt8(ascii: "/")) }
+        scratch.append(contentsOf: folded ? plan.store.folded(id) : plan.store.raw(id))
+        return scratch.withUnsafeBufferPointer { Term.contains($0, needle) }
     }
 }
 
@@ -499,7 +570,7 @@ private struct Term {
         regex?.release()
     }
 
-    @inline(__always) func matches(_ id: Int, plan: Plan) -> Bool {
+    @inline(__always) func matches(_ id: Int, plan: Plan, ctx: inout EvalContext) -> Bool {
         let store = plan.store
         if hasFilesOnly && filesOnly == store.isDirectory(id) { return false }
         if let ext, !Term.extensionEquals(store.folded(id), ext.buffer) { return false }
@@ -524,15 +595,15 @@ private struct Term {
         if let parents, !parents._withUnsafeGuaranteedRef({ $0.containsParent(of: id, store: store) }) { return false }
         if let level, !level.matches(Int64(store.depth(id))) { return false }
         if let chars, !chars.matches(Int64(String(decoding: store.raw(id), as: UTF8.self).count)) { return false }
-        if pathFragment != nil || (hasText && fullPath) {
-            var buffer: [UInt8] = []
-            if let fragment = pathFragment {
-                plan.pathBytes(id, folded: !pathCaseSensitive, into: &buffer)
-                if !buffer.withUnsafeBufferPointer({ Term.contains($0, fragment.buffer) }) { return false }
-            }
-            if hasText && fullPath {
-                plan.pathBytes(id, folded: !caseSensitive, into: &buffer)
-                if !buffer.withUnsafeBufferPointer({ matchText($0, store: store, id: id, path: true) }) { return false }
+        if let fragment = pathFragment, !ctx.pathContains(id, fragment.buffer, folded: !pathCaseSensitive, plan: plan) {
+            return false
+        }
+        if hasText && fullPath {
+            if mode == .substring {
+                if !ctx.pathContains(id, needle.buffer, folded: !caseSensitive, plan: plan) { return false }
+            } else {
+                ctx.fullPath(of: id, folded: !caseSensitive, plan: plan)
+                if !ctx.scratch.withUnsafeBufferPointer({ matchText($0, store: store, id: id, path: true) }) { return false }
             }
         }
         if let touched, !touched.matches(plan.accessTime(id).timeIntervalSince1970) { return false }

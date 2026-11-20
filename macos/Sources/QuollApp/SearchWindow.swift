@@ -1,4 +1,5 @@
 import AppKit
+import Quartz
 import UniformTypeIdentifiers
 import QuollCore
 
@@ -73,7 +74,8 @@ final class SearchPanel: NSWindow {
 }
 
 final class SearchController: NSViewController, NSTableViewDataSource, NSTableViewDelegate,
-                              NSSearchFieldDelegate, NSWindowDelegate {
+                              NSSearchFieldDelegate, NSWindowDelegate, NSMenuDelegate,
+                              QLPreviewPanelDataSource, QLPreviewPanelDelegate {
     private let backend: SearchBackend
     private let queue = DispatchQueue(label: "quoll.app.search", qos: .userInitiated)
     private lazy var pager = ResultPager { [weak self] options, interactive, isCurrent, reply in
@@ -92,6 +94,8 @@ final class SearchController: NSViewController, NSTableViewDataSource, NSTableVi
     private let statusLabel = NSTextField(labelWithString: "")
     private let warningLabel = NSTextField(labelWithString: "")
     private var iconCache: [String: NSImage] = [:]
+    /// Literal pieces of the current query, shown in bold inside names.
+    private var highlights: [String] = []
     private var indexed = 0
     var onHide: (() -> Void)?
     var onSettings: (() -> Void)?
@@ -140,6 +144,15 @@ final class SearchController: NSViewController, NSTableViewDataSource, NSTableVi
         column("folder", "Folder", width: 360, sortKey: nil)
         column("size", "Size", width: 80, sortKey: "size", alignRight: true)
         column("modified", "Modified", width: 130, sortKey: "modified")
+        column("created", "Created", width: 130, sortKey: "created")
+        // Not sortable: an extension sort collects every match (2.3M on an empty query).
+        column("kind", "Kind", width: 70, sortKey: nil)
+        for id in ["created", "kind"] {
+            table.tableColumn(withIdentifier: NSUserInterfaceItemIdentifier(id))?.isHidden = true
+        }
+        let headerMenu = NSMenu()
+        headerMenu.delegate = self
+        table.headerView?.menu = headerMenu
         table.sortDescriptors = [NSSortDescriptor(key: "modified", ascending: false)]
         table.style = .fullWidth
         table.rowHeight = 20
@@ -192,7 +205,9 @@ final class SearchController: NSViewController, NSTableViewDataSource, NSTableVi
 
         pager.onReset = { [weak self] in self?.resultsReset() }
         pager.onRows = { [weak self] rows in
-            self?.table.reloadData(forRowIndexes: IndexSet(integersIn: rows), columnIndexes: IndexSet(integersIn: 0..<4))
+            guard let self else { return }
+            self.table.reloadData(forRowIndexes: IndexSet(integersIn: rows),
+                                  columnIndexes: IndexSet(integersIn: 0..<self.table.numberOfColumns))
         }
     }
 
@@ -222,6 +237,7 @@ final class SearchController: NSViewController, NSTableViewDataSource, NSTableVi
     }
 
     func didHide() {
+        closeQuickLook()
         pager.dropCache()
         table.reloadData()
     }
@@ -246,8 +262,10 @@ final class SearchController: NSViewController, NSTableViewDataSource, NSTableVi
         switch descriptor?.key {
         case "name": sort = .name
         case "size": sort = .size
+        case "created": sort = .created
         default: sort = .modified
         }
+        highlights = Self.highlightPieces(field.stringValue)
         pager.search(field.stringValue, sort: sort, ascending: descriptor?.ascending ?? false)
     }
 
@@ -286,8 +304,13 @@ final class SearchController: NSViewController, NSTableViewDataSource, NSTableVi
         }
         switch id.rawValue {
         case "name":
-            cell.textField?.stringValue = entry.name
+            cell.textField?.attributedStringValue = highlighted(entry.name)
             cell.imageView?.image = icon(for: entry)
+        case "created":
+            let formatter = Calendar.current.isDateInToday(entry.created) ? timeFormatter : dateFormatter
+            cell.textField?.stringValue = formatter.string(from: entry.created)
+        case "kind":
+            cell.textField?.stringValue = entry.isDirectory ? "folder" : entry.fileExtension
         case "folder":
             let folder = (entry.path as NSString).deletingLastPathComponent
             cell.textField?.stringValue = folder.hasPrefix(Self.home) ? "~" + folder.dropFirst(Self.home.count) : folder
@@ -331,6 +354,118 @@ final class SearchController: NSViewController, NSTableViewDataSource, NSTableVi
             text.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
         ])
         return cell
+    }
+
+    // MARK: Highlighting
+
+    /// Plain words of the query (no filters, negations or wildcards) to bold in names.
+    static func highlightPieces(_ query: String) -> [String] {
+        var pieces: [String] = []
+        for token in query.split(whereSeparator: { $0 == " " || $0 == "|" || $0 == "(" || $0 == ")" }) {
+            var word = String(token).replacingOccurrences(of: "\"", with: "")
+            if word.hasPrefix("!") || word.hasPrefix("-") { continue }
+            if let colon = word.firstIndex(of: ":") {
+                let filter = word[..<colon].lowercased()
+                guard ["starts", "ends", "exact", "word", "leaf", "icase", "matchcase"].contains(filter) else { continue }
+                word = String(word[word.index(after: colon)...])
+            }
+            pieces += word.split(whereSeparator: { $0 == "*" || $0 == "?" }).map(String.init).filter { !$0.isEmpty }
+        }
+        return pieces.sorted { $0.count > $1.count }
+    }
+
+    private func highlighted(_ name: String) -> NSAttributedString {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineBreakMode = .byTruncatingTail
+        // labelColor is dynamic: follows light/dark and stays readable in selected rows.
+        let text = NSMutableAttributedString(string: name, attributes: [
+            .font: NSFont.systemFont(ofSize: 13), .foregroundColor: NSColor.labelColor, .paragraphStyle: paragraph
+        ])
+        let ns = name as NSString
+        let bold = NSFont.systemFont(ofSize: 13, weight: .bold)
+        for piece in highlights {
+            var search = NSRange(location: 0, length: ns.length)
+            while search.length > 0 {
+                let found = ns.range(of: piece, options: [.caseInsensitive, .diacriticInsensitive], range: search)
+                if found.location == NSNotFound || found.length == 0 { break }
+                text.addAttribute(.font, value: bold, range: found)
+                let next = found.location + found.length
+                search = NSRange(location: next, length: ns.length - next)
+            }
+        }
+        return text
+    }
+
+    // MARK: Column chooser (header right-click)
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        for column in table.tableColumns where column.identifier.rawValue != "name" {
+            let item = NSMenuItem(title: column.title, action: #selector(toggleColumn(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = column
+            item.state = column.isHidden ? .off : .on
+            menu.addItem(item)
+        }
+    }
+
+    @objc private func toggleColumn(_ sender: NSMenuItem) {
+        guard let column = sender.representedObject as? NSTableColumn else { return }
+        column.isHidden.toggle()
+        if !column.isHidden { table.reloadData() }
+    }
+
+    // MARK: Quick Look (⌘Y)
+
+    func toggleQuickLook() {
+        guard let panel = QLPreviewPanel.shared() else { return }
+        if QLPreviewPanel.sharedPreviewPanelExists() && panel.isVisible {
+            panel.orderOut(nil)
+        } else {
+            panel.makeKeyAndOrderFront(nil)
+        }
+    }
+
+    func closeQuickLook() {
+        if QLPreviewPanel.sharedPreviewPanelExists(), let panel = QLPreviewPanel.shared(), panel.isVisible {
+            panel.orderOut(nil)
+        }
+    }
+
+    override func acceptsPreviewPanelControl(_ panel: QLPreviewPanel!) -> Bool { true }
+
+    override func beginPreviewPanelControl(_ panel: QLPreviewPanel!) {
+        panel.dataSource = self
+        panel.delegate = self
+    }
+
+    override func endPreviewPanelControl(_ panel: QLPreviewPanel!) {
+        panel.dataSource = nil
+        panel.delegate = nil
+    }
+
+    func numberOfPreviewItems(in panel: QLPreviewPanel!) -> Int { selectedEntries.count }
+
+    func previewPanel(_ panel: QLPreviewPanel!, previewItemAt index: Int) -> QLPreviewItem! {
+        let entries = selectedEntries
+        guard index < entries.count else { return nil }
+        return URL(fileURLWithPath: entries[index].path) as NSURL
+    }
+
+    /// ↑/↓ while the preview is key move the selection in the table.
+    func previewPanel(_ panel: QLPreviewPanel!, handle event: NSEvent!) -> Bool {
+        guard event.type == .keyDown else { return false }
+        switch event.keyCode {
+        case 125: moveSelection(by: 1, extend: false); return true
+        case 126: moveSelection(by: -1, extend: false); return true
+        default: return false
+        }
+    }
+
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        if QLPreviewPanel.sharedPreviewPanelExists(), let panel = QLPreviewPanel.shared(), panel.isVisible {
+            panel.reloadData()
+        }
     }
 
     /// One icon per extension (plus folder), never per file: no disk access.
@@ -440,6 +575,7 @@ final class SearchController: NSViewController, NSTableViewDataSource, NSTableVi
             view.window?.makeFirstResponder(field)
             field.currentEditor()?.selectAll(nil)
         case (.command, "r", _): reindex()
+        case (.command, "y", _): toggleQuickLook()
         case (.command, "w", _): onHide?()
         case (.command, ",", _): onSettings?()
         default: return false

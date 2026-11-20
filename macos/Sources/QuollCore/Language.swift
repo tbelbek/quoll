@@ -391,78 +391,54 @@ public enum SearchParser {
             return nil
         }
 
+        /// Dates name a period: a day, a month (`2025-06`) or a year (`2025`).
+        /// A bare value matches the whole period; comparisons use its bounds, so
+        /// `>2025` means after 2025 and `<=2025-06` means up to the end of June.
+        /// Times are whole seconds, so [start, end) is `start ... end - 1 s`.
         static func parseDate(_ raw: String) -> DateRule? {
             let value = raw.trimmingCharacters(in: .whitespaces).lowercased()
-            let calendar = Calendar.current
-            let now = Date()
-
-            if value == "today" { return .onDay(now) }
-            if value == "yesterday" {
-                return .onDay(calendar.date(byAdding: .day, value: -1, to: now) ?? now)
-            }
             if value.contains("..") {
                 let parts = value.components(separatedBy: "..")
-                guard parts.count == 2,
-                      let low = parseDateValue(parts[0]),
-                      let high = parseDateValue(parts[1], upperBound: true) else { return nil }
-                return .range(low, high)
+                guard parts.count == 2, let low = period(parts[0]), let high = period(parts[1]) else { return nil }
+                return .range(low.start, high.end.addingTimeInterval(-1))
             }
-            let prefixes: [(String, (Date) -> DateRule)] = [
-                (">=", DateRule.after),
-                ("<=", DateRule.before),
-                (">", { .after(calendar.date(byAdding: .day, value: 1, to: $0) ?? $0) }),
-                ("<", DateRule.before)
-            ]
-            for (prefix, builder) in prefixes where value.hasPrefix(prefix) {
-                guard let date = parseDateValue(String(value.dropFirst(prefix.count))) else { return nil }
-                return builder(date)
+            for op in [">=", "<=", ">", "<", "="] where value.hasPrefix(op) {
+                guard let p = period(String(value.dropFirst(op.count))) else { return nil }
+                switch op {
+                case ">=": return .after(p.start.addingTimeInterval(-1))
+                case "<=": return .before(p.end)
+                case ">": return .after(p.end.addingTimeInterval(-1))
+                case "<": return .before(p.start)
+                default: return .range(p.start, p.end.addingTimeInterval(-1))
+                }
             }
-            if value.hasPrefix("=") {
-                guard let date = parseDateValue(String(value.dropFirst())) else { return nil }
-                return .onDay(date)
-            }
-            guard let date = parseDateValue(value) else { return nil }
-            return .onDay(date)
+            guard let p = period(value) else { return nil }
+            return .range(p.start, p.end.addingTimeInterval(-1))
         }
 
-        static func parseDateValue(_ raw: String, upperBound: Bool = false) -> Date? {
-            let value = raw.trimmingCharacters(in: .whitespaces)
-            guard !value.isEmpty else { return nil }
+        /// `today`, `yesterday`, `YYYY`, `YYYY-MM`, `YYYY-MM-DD` → [start, end).
+        static func period(_ raw: String) -> (start: Date, end: Date)? {
+            let value = raw.trimmingCharacters(in: .whitespaces).lowercased()
             let calendar = Calendar.current
-            var components = DateComponents()
-
-            if value.count == 4, let year = Int(value) {
-                components.year = year
-                components.month = 1
-                components.day = 1
-                let date = calendar.date(from: components)
-                if upperBound, let date {
-                    return calendar.date(byAdding: DateComponents(year: 1, day: -1), to: date)
-                }
-                return date
+            func day(_ date: Date) -> (Date, Date) {
+                let start = calendar.startOfDay(for: date)
+                return (start, calendar.date(byAdding: .day, value: 1, to: start) ?? start)
             }
-            if value.count == 7, value.contains("-") {
-                let parts = value.split(separator: "-")
-                if parts.count == 2, let year = Int(parts[0]), let month = Int(parts[1]) {
-                    components.year = year
-                    components.month = month
-                    components.day = 1
-                    let date = calendar.date(from: components)
-                    if upperBound, let date {
-                        return calendar.date(byAdding: DateComponents(month: 1, day: -1), to: date)
-                    }
-                    return date
-                }
+            if value == "today" { return day(Date()) }
+            if value == "yesterday" { return day(calendar.date(byAdding: .day, value: -1, to: Date()) ?? Date()) }
+            let parts = value.split(separator: "-").map { Int($0) }
+            guard !parts.isEmpty, !parts.contains(nil), let year = parts[0], value.count >= 4 else { return nil }
+            var components = DateComponents(year: year, month: 1, day: 1)
+            let unit: Calendar.Component
+            switch parts.count {
+            case 1: unit = .year
+            case 2: components.month = parts[1]; unit = .month
+            case 3: components.month = parts[1]; components.day = parts[2]; unit = .day
+            default: return nil
             }
-            let parts = value.split(separator: "-")
-            if parts.count == 3,
-               let year = Int(parts[0]), let month = Int(parts[1]), let day = Int(parts[2]) {
-                components.year = year
-                components.month = month
-                components.day = day
-                return calendar.date(from: components)
-            }
-            return nil
+            guard let start = calendar.date(from: components),
+                  let end = calendar.date(byAdding: unit, value: 1, to: start) else { return nil }
+            return (start, end)
         }
     }
 

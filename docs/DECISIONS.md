@@ -180,3 +180,22 @@ step in `quoll-selftest --m4`:
 - The scan helper has a 10-minute timeout and falls back to an in-process scan if
   the child crashes; the walker re-checks the device after `open` (mount points);
   folder lookups among newly added children use a name hash (was O(n²)).
+
+## D14 — `path:` without a name literal: parent-path cache, no per-folder memo
+
+`path:Repos/quoll` and `fullpath:src/main` have no literal for the name arena, so
+every entry was checked by rebuilding its full path: 275 ms and 310 ms at 1.1M
+entries. Siblings sit next to each other in id order, so each scan chunk now keeps
+the parent's path and whether it already contains the needle; an entry is then
+decided from that flag, or from its own name when the needle has no `/` (if it has
+one, the needle's last segment must be a prefix of the name before anything is
+copied). Result: ~45 ms and ~42 ms (noisy machine, p50), identical results to the
+reference matcher. A per-folder path memo would go further but holds a path per
+folder in memory; the footprint priority keeps it out.
+
+## D15 — Window details measured offscreen
+
+The search field clipped descenders with a 15 pt font in a regular (24 pt)
+control; rendered offscreen, a large control (28 pt) with the standard 13 pt font
+centres the text. Highlighted names use `labelColor` and bold only (no accent
+colour, which would vanish on a selected row); checked in light and dark.

@@ -48,9 +48,12 @@ xattr -dr com.apple.quarantine /Applications/Quoll.app
 3. Press the hotkey: **Hyper+S** (⌃⌥⇧⌘S) by default. With a tool that maps Caps Lock to ⌃⌥⌘ (a "super key", e.g. Vorssaint) use `super+s`. Change it in Settings (⌘,) or `quoll settings --hotkey super+s`,
    e.g. `control+option+space` or `cmd+shift+f`.
 
-**Window.** Type to search; ↑/↓ select, Enter opens, ⌘Enter reveals in Finder,
-⌘C copies paths, ⌘⌥C names, Esc hides, ⌃⌘F full screen. Click a column header to
-sort. Settings (⌘,) holds the hotkey, the folders to index, excludes and includes.
+**Window.** Type to search; matches are shown in bold. ↑/↓ select, Enter opens,
+⌘Enter reveals in Finder, ⌘Y Quick Look, ⌘C copies paths, ⌘⌥C names, Esc hides,
+⌃⌘F full screen. Click a column header to sort; right-click the header to show
+Created or Kind. Settings (⌘,) holds the hotkey, open at login, the folders to
+index, excludes and includes. `quoll show` (or opening the app again) brings the
+window up, handy over a remote session.
 
 **Build from source** (Command Line Tools are enough):
 

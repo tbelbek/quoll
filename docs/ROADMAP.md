@@ -186,12 +186,13 @@ Done in 0.2.0:
 Open:
 
 - [x] Start at login (`SMAppService`), a checkbox in Settings (0.2.1).
-- [ ] Quick Look on ⌘Y.
+- [x] Quick Look on ⌘Y (0.3.0).
 - [ ] HTTP bound to loopback only; drop Basic auth and static file serving.
 - [ ] Reject control paths longer than `sun_path` (104 bytes) with a clear error.
-- [ ] `changed:2025` should mean the whole year, not 1 January.
-- [ ] `path:` per-folder memo (~50 ms at 2.3M entries today).
-- [ ] Hotkey recorder in Settings; match highlighting; Created/Extension columns.
+- [x] Dates name whole periods: `changed:2025` is the year (0.3.0).
+- [x] `path:` caches the parent path per run of siblings: 275 → ~45 ms at 1.1M (0.3.0).
+- [x] Match highlighting; Created and Kind columns (header menu) (0.3.0).
+- [ ] Hotkey recorder in Settings.
 - [ ] Developer ID signing + notarization (needs an Apple Developer account).
 
 ## Cut / defer

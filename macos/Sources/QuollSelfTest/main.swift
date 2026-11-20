@@ -83,6 +83,20 @@ expect(!matches("starts:ackage", entry("/tmp/Package.swift")), "starts rejects")
 expect(matches("ends:.swift", entry("/tmp/Package.swift")), "ends")
 expect(SearchParser.parse("body:needle").warnings.contains { $0.contains("body:") }, "unsupported filter warning")
 
+// Dates name whole periods
+func at(_ y: Int, _ m: Int, _ d: Int, _ h: Int = 12) -> Date {
+    Calendar.current.date(from: DateComponents(year: y, month: m, day: d, hour: h))!
+}
+expect(matches("changed:2025", entry("/tmp/a", modified: at(2025, 7, 1))), "date: year is the whole year")
+expect(!matches("changed:2025", entry("/tmp/a", modified: at(2026, 1, 1, 0))), "date: year ends at its end")
+expect(matches("changed:2025-06", entry("/tmp/a", modified: at(2025, 6, 30, 23))), "date: month is the whole month")
+expect(matches("changed:>2025", entry("/tmp/a", modified: at(2026, 1, 1, 0))), "date: > means after the period")
+expect(!matches("changed:>2025", entry("/tmp/a", modified: at(2025, 12, 31, 23))), "date: > excludes the period")
+expect(matches("changed:<=2025-06", entry("/tmp/a", modified: at(2025, 6, 30, 23))), "date: <= includes the period")
+expect(!matches("changed:<2025-06", entry("/tmp/a", modified: at(2025, 6, 1, 1))), "date: < is before the period")
+expect(matches("changed:2025-01-01..2025-06-30", entry("/tmp/a", modified: at(2025, 6, 30, 18))), "date: range includes its last day")
+expect(matches("changed:today", entry("/tmp/a", modified: Date())), "date: today")
+
 // Fixtures: build a real folder tree, scan it into a snapshot, map it.
 func makeTree(_ files: [String: Int], dirs: [String] = []) throws -> String {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent("qt-" + UUID().uuidString)

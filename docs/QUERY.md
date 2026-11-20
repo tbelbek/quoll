@@ -110,8 +110,10 @@ instead of turning it into a literal filename match.
   unless the pattern anchors itself.
 - `word:` requires a non-word character (or string boundary) on both sides.
 - Filters are ANDed with the text term in the same token.
-- A bare year or month is a single day: `changed:2025` means 1 January 2025.
-  Use a range for the whole year: `changed:2025-01-01..2025-12-31`.
+- A date names a period: `changed:2025` is the whole year, `changed:2025-06`
+  the whole month, `changed:2025-06-30` that day. Comparisons use the period's
+  bounds: `changed:>2025` is after 2025, `changed:<=2025-06` up to the end of June,
+  `changed:2025-01..2025-03` January through March.
 - `chars:<n>` filters by name length; `plain:` turns `pattern:` off again.
 - On the command line, a query that starts with `-` needs `--` first:
   `quoll find -- -draft`.

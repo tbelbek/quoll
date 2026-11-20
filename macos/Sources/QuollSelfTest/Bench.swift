@@ -120,7 +120,8 @@ func benchLoad(_ snapshot: String, queries: Bool) -> Int32 {
 /// Fixed query set; each query runs 20 times, p50/p95 in ms.
 func benchQueries(_ store: IndexStore) {
     let engine = QueryEngine()
-    let queries = ["", "kanelbulle", "*.md", "ending:md", "path:.config json", "report draft", "README"]
+    let queries = ["", "kanelbulle", "*.md", "ending:md", "path:.config json", "report draft", "README",
+                   "path:Repos/quoll", "fullpath:src/main", "under:Repos ending:swift"]
     for sort in [SortKey.name, SortKey.modified] {
         for query in queries {
             var samples: [Double] = []
