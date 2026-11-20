@@ -1,0 +1,6 @@
+.DS_Store
+.build/
+macos/.build/
+*.sock
+catalog.json
+settings.json
