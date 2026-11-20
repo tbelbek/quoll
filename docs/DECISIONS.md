@@ -199,3 +199,24 @@ The search field clipped descenders with a 15 pt font in a regular (24 pt)
 control; rendered offscreen, a large control (28 pt) with the standard 13 pt font
 centres the text. Highlighted names use `labelColor` and bold only (no accent
 colour, which would vanish on a selected row); checked in light and dark.
+
+## D16 — External drives: one index per volume, attached only while mounted
+
+Each mounted local, writable, browsable, non-internal volume gets its own
+`QuollService` (no control socket) with its snapshot under
+`<data>/volumes/<volume uuid>`; searches query every index and merge the pages
+with the engine's sort order. Indexes stop on `willUnmount`, so they never block an
+eject; the snapshot stays on the Mac, and a reattach replays the drive's FSEvents
+history. Right after a mount the volume's FSEvents UUID is not available yet
+(measured: empty), which failed the snapshot check and forced a rescan on every
+reattach; attaching now waits up to 5 s for it. Verified with a writable APFS disk
+image (`quoll-selftest --volumes`). Off by default (Settings or
+`quoll settings --external-drives on`): a large drive is real scan time and disk.
+
+## D17 — Extension lists in one term
+
+Quick filters need "any of 14 extensions". An OR chain of `ending:` terms
+evaluates one term per extension per entry; `ending:pdf;doc;…` is one term whose
+extensions sit NUL-separated in a single raw buffer (no reference-counted field in
+the hot path, D7). Documents filter on an empty query: ~50 ms at 1.1M entries; any
+typed word becomes the memmem driver and brings it back to a few ms.

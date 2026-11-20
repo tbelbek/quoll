@@ -41,6 +41,8 @@ public struct Preferences: Codable, Sendable {
     public var hotkey: String
     /// Login item wanted (the app applies it at launch); nil leaves it alone.
     public var openAtLogin: Bool?
+    /// Index external drives (local, writable, non-internal volumes) while mounted.
+    public var indexExternalVolumes: Bool
 
     public init(
         roots: [String],
@@ -68,11 +70,12 @@ public struct Preferences: Codable, Sendable {
         self.followSymlinks = followSymlinks
         self.useDefaultExcludes = useDefaultExcludes
         self.hotkey = hotkey
+        self.indexExternalVolumes = false
     }
 
     private enum CodingKeys: String, CodingKey {
         case roots, excludes, includes, dataDirectory, controlPath, http, defaultLimit
-        case skipHidden, skipPackages, followSymlinks, useDefaultExcludes, hotkey, openAtLogin
+        case skipHidden, skipPackages, followSymlinks, useDefaultExcludes, hotkey, openAtLogin, indexExternalVolumes
     }
 
     // Tolerant decoding: settings files written by older versions lack newer keys.
@@ -92,6 +95,7 @@ public struct Preferences: Codable, Sendable {
         useDefaultExcludes = try c.decodeIfPresent(Bool.self, forKey: .useDefaultExcludes) ?? true
         hotkey = try c.decodeIfPresent(String.self, forKey: .hotkey) ?? "hyper+s"
         openAtLogin = try c.decodeIfPresent(Bool.self, forKey: .openAtLogin)
+        indexExternalVolumes = try c.decodeIfPresent(Bool.self, forKey: .indexExternalVolumes) ?? false
     }
 
     /// Effective exclude rules: user rules, shipped defaults, and Quoll's own data

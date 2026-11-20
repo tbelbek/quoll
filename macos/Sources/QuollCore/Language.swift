@@ -276,10 +276,8 @@ public enum SearchParser {
             case .blank:
                 term.blank = true
             case .ending:
-                var ending = value.lowercased()
-                if ending.hasPrefix("*.") { ending = String(ending.dropFirst(2)) }
-                if ending.hasPrefix(".") { ending = String(ending.dropFirst()) }
-                term.fileExtension = ending
+                // One or more extensions: `ending:pdf`, `ending:jpg;png;heic` (`,` works too).
+                term.fileExtension = Self.extensionList(value).joined(separator: ";")
             case .path:
                 term.pathFragment = value
             case .under:
@@ -334,6 +332,15 @@ public enum SearchParser {
 
         static func standardize(_ path: String) -> String {
             Scanner.standardize(path)
+        }
+
+        static func extensionList(_ value: String) -> [String] {
+            value.lowercased().split(whereSeparator: { $0 == ";" || $0 == "," }).map { part in
+                var ending = String(part).trimmingCharacters(in: .whitespaces)
+                if ending.hasPrefix("*.") { ending = String(ending.dropFirst(2)) }
+                if ending.hasPrefix(".") { ending = String(ending.dropFirst()) }
+                return ending
+            }
         }
 
         static func isAbsolute(_ value: String) -> Bool {
@@ -622,7 +629,7 @@ public final class Matcher {
         default: break
         }
 
-        if let ext = term.fileExtension, entry.fileExtension != ext { return false }
+        if let ext = term.fileExtension, !ext.split(separator: ";").contains(Substring(entry.fileExtension)) { return false }
 
         if let pathFragment = term.pathFragment {
             let options: String.CompareOptions = term.caseSensitive ? [] : [.caseInsensitive, .diacriticInsensitive]

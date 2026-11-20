@@ -39,7 +39,7 @@ whole-name wildcard unless another mode is selected.
 | Filter | Example | Meaning |
 | --- | --- | --- |
 | `kind:` | `kind:file`, `kind:folder` | entry kind |
-| `ending:` | `ending:swift`, `ending:.pdf` | file extension |
+| `ending:` | `ending:swift`, `ending:.pdf`, `ending:jpg;png;heic` | file extension (one, or a `;`-separated list) |
 | `leaf:` | `leaf:README` | match the name only |
 | `fullpath:` | `fullpath:src` | match the full path |
 | `path:` | `path:clients` | path contains |

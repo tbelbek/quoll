@@ -13,13 +13,23 @@ protocol SearchBackend: AnyObject {
 
 final class InProcessBackend: SearchBackend {
     let service: QuollService
+    var volumes: VolumeIndexes?
     init(service: QuollService) { self.service = service }
 
     func search(_ options: QueryOptions, interactive: Bool) -> QueryResult? {
-        service.engine.search(options, in: service.store, cancellable: interactive)
+        MultiSearch.search(options, in: [service] + (volumes?.indexes ?? []), interactive: interactive)
     }
 
-    func status() -> CatalogStatus? { service.status() }
+    func status() -> CatalogStatus? {
+        var status = service.status()
+        for index in volumes?.indexes ?? [] {
+            let extra = index.status()
+            status.files += extra.files
+            status.directories += extra.directories
+            status.roots += extra.roots
+        }
+        return status
+    }
     func rebuild() { service.rebuild() }
 }
 
@@ -73,6 +83,28 @@ final class SearchPanel: NSWindow {
     }
 }
 
+/// Everything-style quick filters (⌘1…⌘8), combined with the typed query.
+enum QuickFilter: Int, CaseIterable {
+    case all, folders, documents, pictures, audio, video, archives, code
+
+    var title: String {
+        ["All", "Folders", "Documents", "Pictures", "Audio", "Video", "Archives", "Code"][rawValue]
+    }
+
+    var query: String {
+        switch self {
+        case .all: return ""
+        case .folders: return "kind:folder"
+        case .documents: return "ending:pdf;doc;docx;txt;md;rtf;pages;odt;xls;xlsx;csv;numbers;ppt;pptx;key;epub"
+        case .pictures: return "ending:png;jpg;jpeg;gif;heic;heif;webp;tif;tiff;bmp;svg;raw;dng;psd"
+        case .audio: return "ending:mp3;m4a;wav;flac;aac;ogg;aif;aiff;opus"
+        case .video: return "ending:mp4;mov;m4v;mkv;avi;webm;mpg;mpeg"
+        case .archives: return "ending:zip;tar;gz;tgz;bz2;xz;7z;rar;dmg;iso;pkg"
+        case .code: return "ending:swift;c;h;cpp;hpp;m;mm;py;js;mjs;ts;tsx;jsx;go;rs;java;kt;cs;rb;php;sh;zsh;json;yml;yaml;toml;sql;html;css"
+        }
+    }
+}
+
 final class SearchController: NSViewController, NSTableViewDataSource, NSTableViewDelegate,
                               NSSearchFieldDelegate, NSWindowDelegate, NSMenuDelegate,
                               QLPreviewPanelDataSource, QLPreviewPanelDelegate {
@@ -89,6 +121,8 @@ final class SearchController: NSViewController, NSTableViewDataSource, NSTableVi
     }
 
     private let field = NSSearchField()
+    private let filterPopup = NSPopUpButton()
+    private var filter = QuickFilter(rawValue: UserDefaults.standard.integer(forKey: "QuollFilter")) ?? .all
     private let table = NSTableView()
     private let scroll = NSScrollView()
     private let statusLabel = NSTextField(labelWithString: "")
@@ -99,6 +133,8 @@ final class SearchController: NSViewController, NSTableViewDataSource, NSTableVi
     private var indexed = 0
     var onHide: (() -> Void)?
     var onSettings: (() -> Void)?
+    /// Adds an exclude rule (path or name) to the settings.
+    var onExclude: ((String) -> Void)?
 
     private static let home = NSHomeDirectory()
     private let timeFormatter: DateFormatter = { let f = DateFormatter(); f.dateFormat = "HH:mm"; return f }()
@@ -130,6 +166,20 @@ final class SearchController: NSViewController, NSTableViewDataSource, NSTableVi
         field.sendsSearchStringImmediately = true
         field.delegate = self
         field.translatesAutoresizingMaskIntoConstraints = false
+        field.recentsAutosaveName = "QuollRecentSearches"
+        field.maximumRecents = 20
+        rebuildSearchMenu()
+
+        filterPopup.controlSize = .large
+        for item in QuickFilter.allCases {
+            filterPopup.addItem(withTitle: item.title)
+            filterPopup.lastItem?.keyEquivalent = "\(item.rawValue + 1)"
+            filterPopup.lastItem?.keyEquivalentModifierMask = .command
+        }
+        filterPopup.selectItem(at: filter.rawValue)
+        filterPopup.target = self
+        filterPopup.action = #selector(filterChanged)
+        filterPopup.translatesAutoresizingMaskIntoConstraints = false
 
         func column(_ id: String, _ title: String, width: CGFloat, sortKey: String?, alignRight: Bool = false) {
             let c = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(id))
@@ -184,13 +234,17 @@ final class SearchController: NSViewController, NSTableViewDataSource, NSTableVi
         warningLabel.alignment = .right
 
         root.addSubview(field)
+        root.addSubview(filterPopup)
         root.addSubview(scroll)
         root.addSubview(statusLabel)
         root.addSubview(warningLabel)
         NSLayoutConstraint.activate([
             field.topAnchor.constraint(equalTo: root.topAnchor, constant: 32),
             field.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),
-            field.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
+            field.trailingAnchor.constraint(equalTo: filterPopup.leadingAnchor, constant: -8),
+            filterPopup.centerYAnchor.constraint(equalTo: field.centerYAnchor),
+            filterPopup.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
+            filterPopup.widthAnchor.constraint(equalToConstant: 120),
             scroll.topAnchor.constraint(equalTo: field.bottomAnchor, constant: 8),
             scroll.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: root.trailingAnchor),
@@ -213,13 +267,54 @@ final class SearchController: NSViewController, NSTableViewDataSource, NSTableVi
 
     private func contextMenu() -> NSMenu {
         let menu = NSMenu()
-        menu.addItem(withTitle: "Open", action: #selector(openSelection), keyEquivalent: "")
-        menu.addItem(withTitle: "Reveal in Finder", action: #selector(revealSelection), keyEquivalent: "")
-        menu.addItem(.separator())
-        menu.addItem(withTitle: "Copy Path", action: #selector(copyPaths), keyEquivalent: "")
-        menu.addItem(withTitle: "Copy Name", action: #selector(copyNames), keyEquivalent: "")
-        for item in menu.items { item.target = self }
+        menu.delegate = self   // filled in menuNeedsUpdate
         return menu
+    }
+
+    private func fillContextMenu(_ menu: NSMenu) {
+        menu.removeAllItems()
+        let entries = selectedEntries
+        guard let first = entries.first else { return }
+        func add(_ title: String, _ action: Selector, _ object: Any? = nil) {
+            let item = menu.addItem(withTitle: title, action: action, keyEquivalent: "")
+            item.target = self
+            item.representedObject = object
+        }
+        add("Open", #selector(openSelection))
+        let openWith = NSMenuItem(title: "Open With", action: nil, keyEquivalent: "")
+        let apps = NSMenu()
+        let url = URL(fileURLWithPath: first.path)
+        let defaultApp = NSWorkspace.shared.urlForApplication(toOpen: url)
+        for app in NSWorkspace.shared.urlsForApplications(toOpen: url).prefix(15) {
+            let name = FileManager.default.displayName(atPath: app.path)
+            let item = apps.addItem(withTitle: app == defaultApp ? "\(name) (default)" : name,
+                                    action: #selector(openWithApp(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = app
+            let icon = NSWorkspace.shared.icon(forFile: app.path)
+            icon.size = NSSize(width: 16, height: 16)
+            item.image = icon
+        }
+        openWith.submenu = apps
+        menu.addItem(openWith)
+        add("Reveal in Finder", #selector(revealSelection))
+        add("Open in Terminal", #selector(openInTerminal))
+        menu.addItem(.separator())
+        add("Copy Path", #selector(copyPaths))
+        add("Copy Name", #selector(copyNames))
+        menu.addItem(.separator())
+        if entries.count == 1 { add("Rename…", #selector(renameSelection)) }
+        add(entries.count == 1 ? "Move to Trash" : "Move \(entries.count) Items to Trash", #selector(trashSelection))
+        menu.addItem(.separator())
+        let folder = first.isDirectory ? first.path : (first.path as NSString).deletingLastPathComponent
+        add("Exclude Folder “\((folder as NSString).lastPathComponent)”", #selector(excludeRule(_:)), Self.tilde(folder))
+        if first.isDirectory {
+            add("Exclude Every Folder Named “\(first.name)”", #selector(excludeRule(_:)), first.name)
+        }
+    }
+
+    private static func tilde(_ path: String) -> String {
+        path.hasPrefix(home + "/") ? "~" + path.dropFirst(home.count) : path
     }
 
     // MARK: Show / hide
@@ -238,6 +333,7 @@ final class SearchController: NSViewController, NSTableViewDataSource, NSTableVi
 
     func didHide() {
         closeQuickLook()
+        rememberQuery()
         pager.dropCache()
         table.reloadData()
     }
@@ -266,7 +362,10 @@ final class SearchController: NSViewController, NSTableViewDataSource, NSTableVi
         default: sort = .modified
         }
         highlights = Self.highlightPieces(field.stringValue)
-        pager.search(field.stringValue, sort: sort, ascending: descriptor?.ascending ?? false)
+        let typed = field.stringValue.trimmingCharacters(in: .whitespaces)
+        var query = typed
+        if !filter.query.isEmpty { query = typed.isEmpty ? filter.query : "\(filter.query) (\(typed))" }
+        pager.search(query, sort: sort, ascending: descriptor?.ascending ?? false)
     }
 
     private func resultsReset() {
@@ -281,6 +380,7 @@ final class SearchController: NSViewController, NSTableViewDataSource, NSTableVi
     private func updateStatus() {
         var text = "\(pager.total.formatted()) results · \(String(format: "%.1f", pager.tookMS)) ms"
         if pager.isCapped { text += " · showing first \(pager.cap.formatted())" }
+        if filter != .all { text += " · \(filter.title)" }
         text += indexed > 0 ? " · \(indexed.formatted()) indexed" : " · indexing…"
         statusLabel.stringValue = text
         warningLabel.stringValue = pager.warnings.filter { $0 != "cancelled" }.joined(separator: "  ")
@@ -396,9 +496,117 @@ final class SearchController: NSViewController, NSTableViewDataSource, NSTableVi
         return text
     }
 
+    // MARK: Filters, recent and saved searches
+
+    @objc private func filterChanged() {
+        filter = QuickFilter(rawValue: filterPopup.indexOfSelectedItem) ?? .all
+        UserDefaults.standard.set(filter.rawValue, forKey: "QuollFilter")
+        runSearch()
+    }
+
+    /// A query worth keeping (a result was used or the window was dismissed).
+    private func rememberQuery() {
+        let query = field.stringValue.trimmingCharacters(in: .whitespaces)
+        guard !query.isEmpty else { return }
+        field.recentSearches = [query] + field.recentSearches.filter { $0 != query }.prefix(19)
+    }
+
+    private struct SavedSearch: Codable { var name: String; var query: String; var filter: Int }
+
+    private var savedSearches: [SavedSearch] {
+        get {
+            guard let data = UserDefaults.standard.data(forKey: "QuollSavedSearches") else { return [] }
+            return (try? JSONDecoder().decode([SavedSearch].self, from: data)) ?? []
+        }
+        set { UserDefaults.standard.set(try? JSONEncoder().encode(newValue), forKey: "QuollSavedSearches") }
+    }
+
+    /// The magnifier menu: recent searches (managed by NSSearchField) and saved ones.
+    private func rebuildSearchMenu() {
+        let menu = NSMenu(title: "Search")
+        func tagged(_ title: String, _ tag: Int) {
+            let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+            item.tag = tag
+            menu.addItem(item)
+        }
+        tagged("Recent Searches", NSSearchField.recentsTitleMenuItemTag)
+        tagged("", NSSearchField.recentsMenuItemTag)
+        tagged("No Recent Searches", NSSearchField.noRecentsMenuItemTag)
+        tagged("Clear Recent Searches", NSSearchField.clearRecentsMenuItemTag)
+        menu.addItem(.separator())
+        let header = NSMenuItem(title: "Saved Searches", action: nil, keyEquivalent: "")
+        header.isEnabled = false
+        menu.addItem(header)
+        for (index, saved) in savedSearches.enumerated() {
+            let item = NSMenuItem(title: saved.name, action: #selector(applySaved(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = index
+            item.toolTip = saved.query
+            menu.addItem(item)
+        }
+        let save = NSMenuItem(title: "Save Current Search…", action: #selector(saveCurrentSearch), keyEquivalent: "")
+        save.target = self
+        menu.addItem(save)
+        if !savedSearches.isEmpty {
+            let remove = NSMenuItem(title: "Remove Saved Search", action: nil, keyEquivalent: "")
+            let sub = NSMenu()
+            for (index, saved) in savedSearches.enumerated() {
+                let item = sub.addItem(withTitle: saved.name, action: #selector(removeSaved(_:)), keyEquivalent: "")
+                item.target = self
+                item.tag = index
+            }
+            remove.submenu = sub
+            menu.addItem(remove)
+        }
+        field.searchMenuTemplate = menu
+    }
+
+    @objc private func applySaved(_ sender: NSMenuItem) {
+        guard sender.tag < savedSearches.count else { return }
+        let saved = savedSearches[sender.tag]
+        field.stringValue = saved.query
+        filterPopup.selectItem(at: saved.filter)
+        filter = QuickFilter(rawValue: saved.filter) ?? .all
+        runSearch()
+    }
+
+    @objc private func removeSaved(_ sender: NSMenuItem) {
+        var list = savedSearches
+        guard sender.tag < list.count else { return }
+        list.remove(at: sender.tag)
+        savedSearches = list
+        rebuildSearchMenu()
+    }
+
+    @objc func saveCurrentSearch() {
+        let query = field.stringValue.trimmingCharacters(in: .whitespaces)
+        guard let window = view.window, !query.isEmpty || filter != .all else { return }
+        let alert = NSAlert()
+        alert.messageText = "Save Search"
+        alert.informativeText = filter == .all ? query : "\(filter.title): \(query)"
+        let input = NSTextField(string: query.isEmpty ? filter.title : query)
+        input.frame = NSRect(x: 0, y: 0, width: 320, height: 24)
+        alert.accessoryView = input
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = input
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard let self, response == .alertFirstButtonReturn else { return }
+            let name = input.stringValue.trimmingCharacters(in: .whitespaces)
+            var list = self.savedSearches.filter { $0.name != name }
+            list.append(SavedSearch(name: name.isEmpty ? query : name, query: query, filter: self.filter.rawValue))
+            self.savedSearches = list
+            self.rebuildSearchMenu()
+        }
+    }
+
     // MARK: Column chooser (header right-click)
 
     func menuNeedsUpdate(_ menu: NSMenu) {
+        if menu === table.menu {
+            fillContextMenu(menu)
+            return
+        }
         menu.removeAllItems()
         for column in table.tableColumns where column.identifier.rawValue != "name" {
             let item = NSMenuItem(title: column.title, action: #selector(toggleColumn(_:)), keyEquivalent: "")
@@ -495,6 +703,7 @@ final class SearchController: NSViewController, NSTableViewDataSource, NSTableVi
         let urls = selectedEntries.map { URL(fileURLWithPath: $0.path) }
         guard !urls.isEmpty else { return }
         urls.forEach { NSWorkspace.shared.open($0) }
+        rememberQuery()
         onHide?()
     }
 
@@ -502,7 +711,68 @@ final class SearchController: NSViewController, NSTableViewDataSource, NSTableVi
         let urls = selectedEntries.map { URL(fileURLWithPath: $0.path) }
         guard !urls.isEmpty else { return }
         NSWorkspace.shared.activateFileViewerSelecting(urls)
+        rememberQuery()
         onHide?()
+    }
+
+    @objc private func openWithApp(_ sender: NSMenuItem) {
+        guard let app = sender.representedObject as? URL else { return }
+        let urls = selectedEntries.map { URL(fileURLWithPath: $0.path) }
+        NSWorkspace.shared.open(urls, withApplicationAt: app, configuration: NSWorkspace.OpenConfiguration())
+        rememberQuery()
+        onHide?()
+    }
+
+    @objc private func openInTerminal() {
+        guard let first = selectedEntries.first,
+              let terminal = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.Terminal") else { return }
+        let folder = first.isDirectory ? first.path : (first.path as NSString).deletingLastPathComponent
+        NSWorkspace.shared.open([URL(fileURLWithPath: folder)], withApplicationAt: terminal,
+                                configuration: NSWorkspace.OpenConfiguration())
+        onHide?()
+    }
+
+    @objc private func renameSelection() {
+        guard let entry = selectedEntries.first, let window = view.window else { return }
+        let alert = NSAlert()
+        alert.messageText = "Rename “\(entry.name)”"
+        let input = NSTextField(string: entry.name)
+        input.frame = NSRect(x: 0, y: 0, width: 320, height: 24)
+        alert.accessoryView = input
+        alert.addButton(withTitle: "Rename")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = input
+        alert.beginSheetModal(for: window) { [weak self] response in
+            let name = input.stringValue.trimmingCharacters(in: .whitespaces)
+            guard response == .alertFirstButtonReturn, !name.isEmpty, name != entry.name, !name.contains("/") else { return }
+            let source = URL(fileURLWithPath: entry.path)
+            do {
+                try FileManager.default.moveItem(at: source, to: source.deletingLastPathComponent().appendingPathComponent(name))
+            } catch {
+                self?.showError(error)
+            }
+        }
+    }
+
+    /// Like Finder: no confirmation; Finder's Put Back restores the items.
+    @objc private func trashSelection() {
+        let urls = selectedEntries.map { URL(fileURLWithPath: $0.path) }
+        guard !urls.isEmpty else { return }
+        NSWorkspace.shared.recycle(urls) { [weak self] _, error in
+            if let error { DispatchQueue.main.async { self?.showError(error) } }
+        }
+    }
+
+    @objc private func excludeRule(_ sender: NSMenuItem) {
+        guard let rule = sender.representedObject as? String else { return }
+        onExclude?(rule)
+        indexed = 0
+        updateStatus()
+    }
+
+    private func showError(_ error: Error) {
+        guard let window = view.window else { return }
+        NSAlert(error: error).beginSheetModal(for: window)
     }
 
     @objc func copyPaths() { copy(selectedEntries.map(\.path)) }
@@ -576,6 +846,10 @@ final class SearchController: NSViewController, NSTableViewDataSource, NSTableVi
             field.currentEditor()?.selectAll(nil)
         case (.command, "r", _): reindex()
         case (.command, "y", _): toggleQuickLook()
+        case (.command, "s", _): saveCurrentSearch()
+        case (.command, let digit, _) where digit.count == 1 && ("1"..."8").contains(digit):
+            filterPopup.selectItem(at: Int(digit)! - 1)
+            filterChanged()
         case (.command, "w", _): onHide?()
         case (.command, ",", _): onSettings?()
         default: return false

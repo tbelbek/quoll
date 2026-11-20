@@ -29,6 +29,12 @@ gap.
 
 ## Install
 
+**Homebrew.**
+
+```bash
+brew install --cask tbelbek/quoll/quoll   # app in /Applications, `quoll` CLI on PATH
+```
+
 **Download.** Grab `Quoll-<version>-macos-universal.zip` from
 [Releases](https://github.com/tbelbek/quoll/releases), unzip, move `Quoll.app` to
 `/Applications`. Unless the release notes say it is notarized, macOS quarantines
@@ -51,8 +57,12 @@ xattr -dr com.apple.quarantine /Applications/Quoll.app
 **Window.** Type to search; matches are shown in bold. ↑/↓ select, Enter opens,
 ⌘Enter reveals in Finder, ⌘Y Quick Look, ⌘C copies paths, ⌘⌥C names, Esc hides,
 ⌃⌘F full screen. Click a column header to sort; right-click the header to show
-Created or Kind. Settings (⌘,) holds the hotkey, open at login, the folders to
-index, excludes and includes. `quoll show` (or opening the app again) brings the
+Created or Kind. The menu next to the field filters by type (All, Folders,
+Documents, Pictures, Audio, Video, Archives, Code; ⌘1–⌘8). The magnifier menu
+keeps recent searches and saved ones (⌘S saves). Right-click a result for Open
+With, Open in Terminal, Rename, Move to Trash, or to exclude its folder from the
+index. Settings (⌘,) holds the hotkey, open at login, external drives, the folders
+to index, excludes and includes. `quoll show` (or opening the app again) brings the
 window up, handy over a remote session.
 
 **Build from source** (Command Line Tools are enough):

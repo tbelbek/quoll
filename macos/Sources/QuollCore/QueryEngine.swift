@@ -458,6 +458,8 @@ private struct Bytes {
 
 private struct Term {
     var hasFilesOnly = false, filesOnly = false
+    /// Folded extensions, NUL-separated (`ending:jpg;png` → "jpg\0png"); one raw
+    /// buffer keeps `Term` free of reference-counted fields (D7).
     var ext: Bytes?
     var bytes: NumberRule?
     var changed: SecondsRule?
@@ -500,9 +502,10 @@ private struct Term {
         if let f = p.filesOnly { hasFilesOnly = true; filesOnly = f }
         var extLiteral: [UInt8] = []
         if let e = p.fileExtension {
-            let folded = Fold.fold(e)
-            ext = Bytes(folded)
-            if !folded.isEmpty { extLiteral = [UInt8(ascii: ".")] + folded }
+            let list = e.split(separator: ";", omittingEmptySubsequences: false).map { Fold.fold(String($0)) }
+            ext = Bytes(Array(list.joined(separator: [0])))
+            // A single extension is a literal the name must contain (".md").
+            if list.count == 1, !list[0].isEmpty { extLiteral = [UInt8(ascii: ".")] + list[0] }
         }
         bytes = p.bytes
         changed = p.changed.map(SecondsRule.init)
@@ -573,7 +576,7 @@ private struct Term {
     @inline(__always) func matches(_ id: Int, plan: Plan, ctx: inout EvalContext) -> Bool {
         let store = plan.store
         if hasFilesOnly && filesOnly == store.isDirectory(id) { return false }
-        if let ext, !Term.extensionEquals(store.folded(id), ext.buffer) { return false }
+        if let ext, !Term.extensionInList(store.folded(id), ext.buffer) { return false }
         if bytes != nil || changed != nil || made != nil || hasBlank {
             let meta = store.meta(id)
             if let bytes, !bytes.matches(Int64(meta.size)) { return false }
@@ -702,6 +705,16 @@ private struct Term {
         var onlyDots = true
         for i in 0..<dot where name[i] != UInt8(ascii: ".") { onlyDots = false; break }
         return onlyDots ? nil : (dot + 1)..<name.count
+    }
+
+    /// Extension equals one of the NUL-separated entries of `list`.
+    @inline(__always) static func extensionInList(_ name: UnsafeBufferPointer<UInt8>, _ list: UnsafeBufferPointer<UInt8>) -> Bool {
+        var start = 0
+        for i in 0...list.count where i == list.count || list[i] == 0 {
+            if extensionEquals(name, UnsafeBufferPointer(rebasing: list[start..<i])) { return true }
+            start = i + 1
+        }
+        return false
     }
 
     @inline(__always) static func extensionEquals(_ name: UnsafeBufferPointer<UInt8>, _ ext: UnsafeBufferPointer<UInt8>) -> Bool {

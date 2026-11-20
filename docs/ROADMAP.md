@@ -192,6 +192,10 @@ Open:
 - [x] Dates name whole periods: `changed:2025` is the year (0.3.0).
 - [x] `path:` caches the parent path per run of siblings: 275 → ~45 ms at 1.1M (0.3.0).
 - [x] Match highlighting; Created and Kind columns (header menu) (0.3.0).
+- [x] Quick filters (⌘1–⌘8), recent and saved searches, Open With / Terminal /
+      Rename / Trash, exclude a folder from a result (0.4.0).
+- [x] External drives: an index per mounted drive, replayed on reattach (0.4.0).
+- [x] Homebrew tap: `brew install --cask tbelbek/quoll/quoll` (0.4.0).
 - [ ] Hotkey recorder in Settings.
 - [ ] Developer ID signing + notarization (needs an Apple Developer account).
 

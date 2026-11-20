@@ -12,6 +12,7 @@ final class SettingsWindow: NSWindow {
     private let includes = SettingsWindow.textArea()
     private let defaults = NSButton(checkboxWithTitle: "", target: nil, action: nil)
     private let atLogin = NSButton(checkboxWithTitle: "Open Quoll at login", target: nil, action: nil)
+    private let externalDrives = NSButton(checkboxWithTitle: "Index external drives while they are connected", target: nil, action: nil)
     private let loginNote = NSTextField(labelWithString: "")
     private let onSave: (Preferences) -> Void
     private var base: Preferences
@@ -51,7 +52,7 @@ final class SettingsWindow: NSWindow {
         loginNote.font = .systemFont(ofSize: 11)
         loginNote.textColor = .secondaryLabelColor
         let stack = NSStackView(views: [
-            atLogin, loginNote,
+            atLogin, loginNote, externalDrives,
             label("Global hotkey"), hotkeyField,
             hint("e.g. super+s (⌃⌥⌘S), hyper+s (⌃⌥⇧⌘S), control+option+space, cmd+shift+f"), hotkeyNote,
             label("Folders to index (one per line)"), roots.scroll,
@@ -93,6 +94,7 @@ final class SettingsWindow: NSWindow {
         excludes.text.string = settings.excludes.joined(separator: "\n")
         includes.text.string = settings.includes.joined(separator: "\n")
         defaults.state = settings.useDefaultExcludes ? .on : .off
+        externalDrives.state = settings.indexExternalVolumes ? .on : .off
         refreshLoginState()
     }
 
@@ -139,6 +141,7 @@ final class SettingsWindow: NSWindow {
         updated.excludes = lines(excludes)
         updated.includes = lines(includes)
         updated.useDefaultExcludes = defaults.state == .on
+        updated.indexExternalVolumes = externalDrives.state == .on
         if updated.roots.isEmpty { updated.roots = base.roots }
         applyLogin()
         updated.openAtLogin = atLogin.state == .on

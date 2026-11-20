@@ -74,8 +74,13 @@ public final class QuollService {
     public var compactIdle: TimeInterval = 300
     public var compactAge: TimeInterval = 6 * 3600
 
-    public init(settings: Preferences) {
+    /// `controlServer: false` for secondary indexes (external drives) that only
+    /// the app searches.
+    private let serveControl: Bool
+
+    public init(settings: Preferences, controlServer: Bool = true) {
         self.settings = settings
+        serveControl = controlServer
     }
 
     // MARK: - Lifecycle
@@ -88,14 +93,16 @@ public final class QuollService {
 
         let loaded = loadSnapshot()
 
-        let server = ControlServer(controlPath: settings.controlPath) { [weak self] request in
-            guard let self else {
-                return ControlReply.failure("unavailable", "service is not running", id: request.id)
+        if serveControl {
+            let server = ControlServer(controlPath: settings.controlPath) { [weak self] request in
+                guard let self else {
+                    return ControlReply.failure("unavailable", "service is not running", id: request.id)
+                }
+                return self.handle(request)
             }
-            return self.handle(request)
+            try server.start()
+            control = server
         }
-        try server.start()
-        control = server
 
         let since: UInt64
         if loaded {
@@ -115,7 +122,7 @@ public final class QuollService {
         appliedEventId = since
         startWatcher(since: since)
 
-        if settings.http.enabled {
+        if serveControl && settings.http.enabled {
             startHTTP()
         }
 
@@ -183,9 +190,14 @@ public final class QuollService {
             return false
         }
         let meta = store.meta
-        guard meta.rulesFingerprint == fingerprint, meta.roots == roots,
-              meta.devices == meta.roots.map(ChangeWatcher.volumeUUID(for:)), meta.eventId > 0 else {
-            log("roots, rules or volumes changed since the snapshot; rescanning")
+        let devices = meta.roots.map(ChangeWatcher.volumeUUID(for:))
+        var reasons: [String] = []
+        if meta.rulesFingerprint != fingerprint { reasons.append("rules") }
+        if meta.roots != roots { reasons.append("roots \(meta.roots) → \(roots)") }
+        if meta.devices != devices { reasons.append("volume ids \(meta.devices) → \(devices)") }
+        if meta.eventId == 0 { reasons.append("no event id") }
+        guard reasons.isEmpty else {
+            log("snapshot does not match (\(reasons.joined(separator: "; "))); rescanning")
             return false
         }
         lastScan = meta.written

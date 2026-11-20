@@ -20,6 +20,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var settings = Preferences.default()
     private var service: QuollService?
     private var backend: SearchBackend?
+    private var volumes: VolumeIndexes?
     private var panel: SearchPanel?
     private var controller: SearchController?
     private var statusItem: NSStatusItem?
@@ -40,6 +41,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             let controller = SearchController(backend: backend)
             controller.onHide = { [weak self] in self?.hidePanel() }
             controller.onSettings = { [weak self] in self?.openSettings() }
+            controller.onExclude = { [weak self] rule in
+                guard let self, !self.settings.excludes.contains(rule) else { return }
+                var updated = self.settings
+                updated.excludes.append(rule)
+                self.apply(updated)
+            }
             let panel = SearchPanel()
             panel.contentViewController = controller
             panel.delegate = self
@@ -65,6 +72,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        volumes?.stop()
         service?.stop()
     }
 
@@ -82,7 +90,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
         service.onShow = { [weak self] in self?.showPanel() }
         self.service = service
-        return InProcessBackend(service: service)
+        let backend = InProcessBackend(service: service)
+        configureVolumes(for: backend)
+        return backend
+    }
+
+    /// External-drive indexes follow `indexExternalVolumes`; restarted on settings
+    /// changes so they pick up new excludes.
+    private func configureVolumes(for backend: InProcessBackend) {
+        volumes?.stop()
+        volumes = nil
+        backend.volumes = nil
+        guard settings.indexExternalVolumes else { return }
+        let manager = VolumeIndexes(settings: settings)
+        backend.volumes = manager
+        volumes = manager
+        DispatchQueue.global(qos: .utility).async { manager.start() }
     }
 
     /// `openAtLogin` from settings.json (also set by `quoll settings --open-at-login`).
@@ -178,6 +201,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         guard let status = backend?.status() else { return }
         let total = status.files + status.directories
         countItem.title = total > 0 ? "\(total.formatted()) entries indexed" : "indexing…"
+        let drives = volumes?.mountPaths.count ?? 0
+        if drives > 0 { countItem.title += " · \(drives) external drive\(drives == 1 ? "" : "s")" }
     }
 
     @objc private func reindex() { controller?.reindex() }
@@ -195,6 +220,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// Saves and applies settings: hotkey immediately, roots/rules by a rescan.
     private func apply(_ updated: Preferences) {
         settings = updated
+        if let inProcess = backend as? InProcessBackend { configureVolumes(for: inProcess) }
         if let service {
             DispatchQueue.global(qos: .utility).async { [weak self] in
                 service.update(settings: updated)

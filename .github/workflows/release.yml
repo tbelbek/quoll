@@ -10,6 +10,7 @@ jobs:
     env:
       # secrets cannot be tested in a step `if:` directly
       HAS_DEVELOPER_ID: ${{ secrets.DEVELOPER_ID_P12 != '' }}
+      HAS_TAP_TOKEN: ${{ secrets.TAP_TOKEN != '' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -43,3 +44,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "$GITHUB_REF_NAME" dist/* --title "Quoll $GITHUB_REF_NAME" --generate-notes
+      - name: Update Homebrew tap (optional)
+        if: env.HAS_TAP_TOKEN == 'true'
+        env:
+          TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+        run: |
+          VERSION="$(cat VERSION)"
+          SHA="$(cut -d' ' -f1 dist/*.sha256)"
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/tbelbek/homebrew-quoll.git" "$RUNNER_TEMP/tap"
+          ./scripts/update-cask.sh "$VERSION" "$SHA" "$RUNNER_TEMP/tap"
+          cd "$RUNNER_TEMP/tap"
+          git config user.name "quoll-release"
+          git config user.email "quoll-release@users.noreply.github.com"
+          git commit -am "quoll $VERSION" && git push

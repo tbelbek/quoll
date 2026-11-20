@@ -6,6 +6,9 @@ ScanHelper.runIfRequested()
 if CommandLine.arguments.contains("--bench") {
     exit(runBench(CommandLine.arguments))
 }
+if CommandLine.arguments.contains("--volumes") {
+    exit(runVolumes(CommandLine.arguments))
+}
 if CommandLine.arguments.contains("--m4") {
     exit(runDurability(CommandLine.arguments))
 }
@@ -81,6 +84,8 @@ expect(matches("icase:package", entry("/tmp/Package.swift")), "icase")
 expect(matches("starts:Pack", entry("/tmp/Package.swift")), "starts")
 expect(!matches("starts:ackage", entry("/tmp/Package.swift")), "starts rejects")
 expect(matches("ends:.swift", entry("/tmp/Package.swift")), "ends")
+expect(matches("ending:jpg;png;heic", entry("/tmp/a.PNG")), "ending: list")
+expect(!matches("ending:jpg;png", entry("/tmp/a.gif")), "ending: list rejects")
 expect(SearchParser.parse("body:needle").warnings.contains { $0.contains("body:") }, "unsupported filter warning")
 
 // Dates name whole periods

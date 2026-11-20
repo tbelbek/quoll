@@ -121,7 +121,8 @@ func benchLoad(_ snapshot: String, queries: Bool) -> Int32 {
 func benchQueries(_ store: IndexStore) {
     let engine = QueryEngine()
     let queries = ["", "kanelbulle", "*.md", "ending:md", "path:.config json", "report draft", "README",
-                   "path:Repos/quoll", "fullpath:src/main", "under:Repos ending:swift"]
+                   "path:Repos/quoll", "fullpath:src/main", "under:Repos ending:swift",
+                   "ending:pdf;doc;docx;txt;md;rtf;pages;xls;xlsx;csv;ppt;pptx;key;numbers"]
     for sort in [SortKey.name, SortKey.modified] {
         for query in queries {
             var samples: [Double] = []
@@ -164,7 +165,8 @@ func runEquivalence(_ arguments: [String]) -> Int32 {
                    "bytes:>1mb", "changed:2025", "starts:test", "ends:.json", "exact:package.json", "word:test",
                    "pattern:^v[0-9]", "!ending:md kind:file", "under:docs", "parent:src", "level:>8", "blank:",
                    "chars:>40", "\"read me\"", "a|b ending:png", "matchcase:README", "fullpath:src/main",
-                   "made:<2024", "?.txt", "*test*.swift", "ending:swift|ending:md under:Sources"]
+                   "made:<2024", "?.txt", "*test*.swift", "ending:swift|ending:md under:Sources",
+                   "ending:png;jpg;jpeg;gif;heic;webp", "kind:file ending:zip;tar;gz;7z;dmg"]
     var mismatches = 0
     for query in queries {
         let fresh = Set(engine.search(QueryOptions(query: query, limit: 0), in: store).results.map(\.path))
@@ -360,5 +362,67 @@ func runDurability(_ arguments: [String]) -> Int32 {
     fourth.stop()
 
     print(failed == 0 ? "\nm4 checks passed" : "\n\(failed) m4 check(s) failed")
+    return failed == 0 ? 0 : 1
+}
+
+/// `quoll-selftest --volumes <dmg>`: an external-drive index on a writable disk
+/// image: indexed on mount, merged into searches, live changes tracked, stopped
+/// before unmount, replayed (not rescanned) after reattach.
+func runVolumes(_ arguments: [String]) -> Int32 {
+    guard let i = arguments.firstIndex(of: "--volumes"), i + 1 < arguments.count else { return 2 }
+    let image = arguments[i + 1]
+    let fm = FileManager.default
+    var failed = 0
+    func check(_ ok: Bool, _ name: String) { print("\(ok ? "ok  " : "FAIL") \(name)"); if !ok { failed += 1 } }
+    func shell(_ command: String) {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        p.arguments = ["-c", command]
+        try? p.run()
+        p.waitUntilExit()
+    }
+    func wait(_ seconds: Double, _ condition: () -> Bool) -> Bool {
+        let end = Date().addingTimeInterval(seconds)
+        while Date() < end {
+            if condition() { return true }
+            RunLoop.main.run(until: Date().addingTimeInterval(0.2))   // NSWorkspace notifications
+        }
+        return false
+    }
+    let base = (NSHomeDirectory() as NSString).appendingPathComponent(".qvol-\(getpid())")
+    defer { try? fm.removeItem(atPath: base) }
+    var settings = Preferences.default()
+    settings.dataDirectory = base
+    settings.indexExternalVolumes = true
+
+    shell("hdiutil attach '\(image)' -quiet")
+    let mount = "/Volumes/QuollTestVol"
+    check(fm.fileExists(atPath: mount + "/projects/alpha/volume-marker.txt"), "test volume attached")
+    check(VolumeIndexes.eligibleVolumes().map(\.path).contains(mount), "volume is eligible")
+
+    let volumes = VolumeIndexes(settings: settings)
+    volumes.start()
+    let indexed = wait(30) {
+        volumes.indexes.first.map { v in v.store.read { v.store.resolve(mount + "/projects/alpha/volume-marker.txt") != nil } } ?? false
+    }
+    check(indexed, "volume indexed on mount")
+    func find(_ q: String) -> [String] {
+        MultiSearch.search(QueryOptions(query: q, limit: 50), in: volumes.indexes, interactive: false).results.map(\.path)
+    }
+    check(find("volume-marker").contains(mount + "/projects/alpha/volume-marker.txt"), "search finds the file on the volume")
+
+    shell("echo y > '\(mount)/projects/alpha/live-added.txt'")
+    check(wait(10) { find("live-added").count == 1 }, "live change on the volume is indexed")
+
+    shell("hdiutil detach '\(mount)' -quiet")
+    check(wait(10) { volumes.indexes.isEmpty }, "index stopped when the volume unmounted")
+    check(!fm.fileExists(atPath: mount), "volume detached (eject not blocked)")
+
+    shell("hdiutil attach '\(image)' -quiet && echo z > '\(mount)/offline.txt'")
+    check(wait(30) { find("offline").count == 1 }, "reattach: change made before attach is found")
+    check(volumes.indexes.first?.fullScans == 0, "reattach replayed instead of rescanning (\(volumes.indexes.first?.fullScans ?? -1))")
+    volumes.stop()
+    shell("hdiutil detach '\(mount)' -quiet")
+    print(failed == 0 ? "\nvolume checks passed" : "\n\(failed) volume check(s) failed")
     return failed == 0 ? 0 : 1
 }

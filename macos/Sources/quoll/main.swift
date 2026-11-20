@@ -440,6 +440,10 @@ private func commandSettings(_ arguments: [String], settings: Preferences) {
         updated.hotkey = hotkey
         changed = true
     }
+    if let drives = value(for: "--external-drives", in: arguments) {
+        updated.indexExternalVolumes = ["on", "yes", "true", "1"].contains(drives.lowercased())
+        changed = true
+    }
     if let login = value(for: "--open-at-login", in: arguments) {
         updated.openAtLogin = ["on", "yes", "true", "1"].contains(login.lowercased())
         changed = true
@@ -483,7 +487,7 @@ private func usage() {
                      [--exclude PATTERN] [--remove-exclude PATTERN] [--clear-excludes]
                      [--include PATTERN] [--remove-include PATTERN]
                      [--no-default-excludes] [--default-excludes]
-                     [--open-at-login on|off]   applied when the app starts
+                     [--open-at-login on|off] [--external-drives on|off]   applied when the app starts
                      [--hotkey SPEC]   e.g. super+s (⌃⌥⌘S), hyper+s (⌃⌥⇧⌘S); restart the app
       quoll show        bring up the search window (Quoll.app must be running)
       quoll help
